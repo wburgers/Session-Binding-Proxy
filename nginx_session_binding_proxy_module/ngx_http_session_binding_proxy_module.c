@@ -1,5 +1,5 @@
 /*
-* Copyright (C) Willem Burgers, http://www.willemburgers.nl/nginx
+* Copyright (C) Willem Burgers, http://www.willemburgers.nl/nginx/sessionbindingproxy
 */
 
 #include <ngx_config.h>
