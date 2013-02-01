@@ -148,7 +148,6 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
     }
 	
 	static ngx_str_t					name = ngx_string("s_session_id="), verification = ngx_string("+session_binding_proxy");
-	ngx_buf_t							*b;
 	ngx_uint_t							i;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
@@ -204,7 +203,7 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 		
 		if(ngx_strncmp((&header[i])->key.data, "Cookie",6) == 0 && done !=1)
 		{					
-			if((p1 = ngx_strstr((&header[i])->value.data, name.data)) != NULL)
+			if((p1 = (u_char *) ngx_strstr((&header[i])->value.data, name.data)) != NULL)
 			{
 				p2 = (u_char *) ngx_strchr(p1, '=');
 				p3 = (u_char *) ngx_strchr(p1, ';');
@@ -304,7 +303,6 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 
     static ngx_str_t					name = ngx_string("s_session_id="), verification = ngx_string("+session_binding_proxy");
 	ngx_str_t							arg, value, res, iv;
-	ngx_buf_t							*b;
 	ngx_uint_t							i;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
@@ -342,6 +340,8 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	part = &r->headers_out.headers.part;
 	header = part->elts;
 
+	arg.len = 0;
+	
 	for (i = 0; /* void */; i++) {
 
 		if (i >= part->nelts) {
@@ -448,7 +448,6 @@ ngx_int_t ngx_http_session_binding_proxy_3des_mac_encrypt(ngx_pool_t *pool, ngx_
     int ret;
     size_t block_size, buf_size, data_size;
     int len;
-    time_t now;
 
     if (key_len != ngx_http_encrypted_session_key_length)
     {
@@ -540,7 +539,6 @@ ngx_http_session_binding_proxy_3des_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log
     int len;
     u_char *p;
     const u_char *digest;
-    time_t now;
 
     u_char new_digest[MD5_DIGEST_LENGTH];
 
@@ -629,7 +627,7 @@ static char *
 ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
     //ngx_http_core_loc_conf_t *clcf;
-	ngx_str_t *value, *url;
+	ngx_str_t *value;
 	
 	ngx_http_session_binding_proxy_loc_conf_t  *splcf = conf;
 	
