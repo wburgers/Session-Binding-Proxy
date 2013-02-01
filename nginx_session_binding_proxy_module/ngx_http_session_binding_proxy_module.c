@@ -361,6 +361,9 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 				p1 = (u_char *) ngx_strchr((&header[i])->value.data, '=');
 				p2 = (u_char *) ngx_strchr((&header[i])->value.data, ';');
 				
+				arg.len = 0;
+				arg.data = ngx_palloc(r->pool, arg.len);
+				
 				if (p1 && p2) {
 					p1++;
 					arg.len = (((&header[i])->value.data + (&header[i])->value.len) - p1) - (((&header[i])->value.data + (&header[i])->value.len) - p2);
