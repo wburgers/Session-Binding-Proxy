@@ -202,17 +202,29 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 						"Session Binding Proxy Handler done: %d", done);
 		
 		if(ngx_strncmp((&header[i])->key.data, "Cookie",6) == 0 && done !=1)
-		{					
-			if((p1 = (u_char *) ngx_strstr((&header[i])->value.data, name.data)) != NULL)
-			{
+		{
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+						"Session Binding Proxy Handler searching for: %V", &name);
+			
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+						"Session Binding Proxy Handler in string: %V", &((&header[i])->value));
+			
+			if((p1 = (u_char *) ngx_strstr(((&header[i])->value).data, name.data)) != NULL)
+			{	
 				p2 = (u_char *) ngx_strchr(p1, '=');
 				p3 = (u_char *) ngx_strchr(p1, ';');
 				
-				if (p2 && p3) {
+				if (p2) {
 					p2++;
-					arg.len = (((&header[i])->value.data + (&header[i])->value.len) - p2) - (((&header[i])->value.data + (&header[i])->value.len) - p3);
+					arg.len = ((&header[i])->value.data + (&header[i])->value.len) - p2;
+					if(p3){
+						arg.len -= ((&header[i])->value.data + (&header[i])->value.len) - p3;
+					}
 					arg.data = p2;
 				}
+				
+				ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+						"Encrypted cookie value: %V", &arg);
 				
 				ngx_str_t decoded;
 				decoded.len = ngx_base64_decoded_length(arg.len) + 1;
@@ -248,7 +260,9 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 							
 							cookie.len += name.len;
 							cookie.len += decrypted.len - verification.len;
-							cookie.len += (header[i].value.data + header[i].value.len) - p3;
+							if(p3){
+								cookie.len += (header[i].value.data + header[i].value.len) - p3;
+							}
 							
 							p = cookie.data = ngx_palloc(r->pool, cookie.len);
 							if(p == NULL) {
@@ -258,7 +272,9 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 							p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
 							p = ngx_copy(p, name.data, name.len);
 							p = ngx_copy(p, decrypted.data, decrypted.len - verification.len);
-							p = ngx_copy(p, p3, (header[i].value.data + header[i].value.len) - p3);
+							if(p3){
+								p = ngx_copy(p, p3, (header[i].value.data + header[i].value.len) - p3);
+							}
 							
 							header[i].value.len = cookie.len;
 							header[i].value.data = cookie.data;
