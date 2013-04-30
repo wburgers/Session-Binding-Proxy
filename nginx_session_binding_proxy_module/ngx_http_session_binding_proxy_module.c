@@ -41,7 +41,7 @@ enum {
 typedef struct {
 	ngx_flag_t					enable;
 	u_char						*key;
-	
+	ngx_array_t					*variables;
 } ngx_http_session_binding_proxy_loc_conf_t;
 
 static char *ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
@@ -61,7 +61,7 @@ static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 
 static ngx_command_t ngx_http_session_binding_proxy_commands[] = {
     { ngx_string("session_binding_proxy"),
-      NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
       ngx_http_session_binding_proxy,
       NGX_HTTP_LOC_CONF_OFFSET,
       0,
@@ -71,14 +71,14 @@ static ngx_command_t ngx_http_session_binding_proxy_commands[] = {
 };
 
 static ngx_http_module_t ngx_http_session_binding_proxy_module_ctx = {
-    NULL,									/* preconfiguration */
+    NULL,											/* preconfiguration */
     ngx_http_session_binding_proxy_init,			/* postconfiguration */
 
-    NULL,									/* create main configuration */
-    NULL,									/* init main configuration */
+    NULL,											/* create main configuration */
+    NULL,											/* init main configuration */
 
-    NULL,									/* create server configuration */
-    NULL,									/* merge server configuration */
+    NULL,											/* create server configuration */
+    NULL,											/* merge server configuration */
 
 	ngx_http_session_binding_proxy_create_loc_conf,	/* create location configuration */
     ngx_http_session_binding_proxy_merge_loc_conf	/* merge location configuration */
@@ -88,14 +88,14 @@ ngx_module_t ngx_http_session_binding_proxy_module = {
     NGX_MODULE_V1,
     &ngx_http_session_binding_proxy_module_ctx,		/* module context */
     ngx_http_session_binding_proxy_commands,		/* module directives */
-    NGX_HTTP_MODULE,						/* module type */
-    NULL,									/* init master */
-    NULL,									/* init module */
-    NULL,									/* init process */
-    NULL,									/* init thread */
-    NULL,									/* exit thread */
-    NULL,									/* exit process */
-    NULL,									/* exit master */
+    NGX_HTTP_MODULE,								/* module type */
+    NULL,											/* init master */
+    NULL,											/* init module */
+    NULL,											/* init process */
+    NULL,											/* init thread */
+    NULL,											/* exit thread */
+    NULL,											/* exit process */
+    NULL,											/* exit master */
     NGX_MODULE_V1_PADDING
 };
 
@@ -147,14 +147,19 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 	
-	static ngx_str_t					name = ngx_string("s_session_id="), verification = ngx_string("+session_binding_proxy");
-	ngx_uint_t							i;
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+						"Session Binding Proxy number of cookies to decrypt: %d", splcf->variables->nelts);
+	
+	static ngx_str_t					verification = ngx_string("+session_binding_proxy");
+	ngx_uint_t i,j;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
 	u_char								*p, *p1, *p2, *p3, *p4, *dst;
-	ngx_str_t							arg,cookie,iv;
+	ngx_str_t							arg,cookie,iv, *variable;
 	size_t								len;
 	ngx_int_t							rc, done=0;
+	
+	variable = splcf->variables->elts;
 	
 	if (r->connection->ssl) {
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
@@ -198,100 +203,101 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 			i = 0;
 		}
 		
-		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-						"Session Binding Proxy Handler done: %d", done);
-		
 		if(ngx_strncmp((&header[i])->key.data, "Cookie",6) == 0 && done !=1)
 		{
-			ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-						"Session Binding Proxy Handler searching for: %V", &name);
-			
-			ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-						"Session Binding Proxy Handler in string: %V", &((&header[i])->value));
-			
-			if((p1 = (u_char *) ngx_strstr(((&header[i])->value).data, name.data)) != NULL)
-			{	
-				p2 = (u_char *) ngx_strchr(p1, '=');
-				p3 = (u_char *) ngx_strchr(p1, ';');
-				
-				if (p2) {
-					p2++;
-					arg.len = ((&header[i])->value.data + (&header[i])->value.len) - p2;
-					if(p3){
-						arg.len -= ((&header[i])->value.data + (&header[i])->value.len) - p3;
-					}
-					arg.data = p2;
-				}
+			for(j = 0;j<splcf->variables->nelts;j++) {
+				ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+							"Session Binding Proxy Handler searching for: %V", &variable[j]);
 				
 				ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-						"Encrypted cookie value: %V", &arg);
+							"Session Binding Proxy Handler in string: %V", &((&header[i])->value));
 				
-				ngx_str_t decoded;
-				decoded.len = ngx_base64_decoded_length(arg.len) + 1;
-				p = decoded.data = ngx_pnalloc(r->pool, decoded.len);
-				if (p == NULL) {
-					return NGX_ERROR;
-				}
-				ngx_decode_base64(&decoded, &arg);
-				decoded.data[decoded.len] = '\0';
-				
-				rc = ngx_http_session_binding_proxy_3des_mac_decrypt(r->pool,
-					r->connection->log, iv.data, iv.len,
-					splcf->key, ngx_http_encrypted_session_key_length,
-					decoded, &dst, &len);
-
-				if (rc == NGX_OK) {
-					ngx_str_t decrypted;
-					decrypted.len = len;
-					decrypted.data = dst;
+				if((p1 = (u_char *) ngx_strstr(((&header[i])->value).data, variable[j].data)) != NULL)
+				{	
+					p2 = (u_char *) ngx_strchr(p1, '=');
+					p3 = (u_char *) ngx_strchr(p1, ';');
+					
+					if (p2) {
+						p2++;
+						arg.len = ((&header[i])->value.data + (&header[i])->value.len) - p2;
+						if(p3){
+							arg.len -= ((&header[i])->value.data + (&header[i])->value.len) - p3;
+						}
+						arg.data = p2;
+					}
 					
 					ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-								"Session Binding Proxy decrypted: %V",
-								&decrypted);
+							"Encrypted cookie value: %V", &arg);
 					
-					p4 = (u_char *) ngx_strrchr(decrypted.data, '+');
+					ngx_str_t decoded;
+					decoded.len = ngx_base64_decoded_length(arg.len) + 1;
+					p = decoded.data = ngx_pnalloc(r->pool, decoded.len);
+					if (p == NULL) {
+						return NGX_ERROR;
+					}
+					ngx_decode_base64(&decoded, &arg);
+					decoded.data[decoded.len] = '\0';
 					
-					if (p4) {
-						if (ngx_memcmp(p4,verification.data,decrypted.data + decrypted.len - p4) == 0) {
-							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-							"Valid cookie");
-							
-							cookie.len = (p1 - header[i].value.data);
-							
-							cookie.len += name.len;
-							cookie.len += decrypted.len - verification.len;
-							if(p3){
-								cookie.len += (header[i].value.data + header[i].value.len) - p3;
+					rc = ngx_http_session_binding_proxy_3des_mac_decrypt(r->pool,
+						r->connection->log, iv.data, iv.len,
+						splcf->key, ngx_http_encrypted_session_key_length,
+						decoded, &dst, &len);
+
+					if (rc == NGX_OK) {
+						ngx_str_t decrypted;
+						decrypted.len = len;
+						decrypted.data = dst;
+						
+						ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+									"Session Binding Proxy decrypted: %V",
+									&decrypted);
+						
+						p4 = (u_char *) ngx_strrchr(decrypted.data, '+');
+						
+						if (p4) {
+							if (ngx_memcmp(p4,verification.data,decrypted.data + decrypted.len - p4) == 0) {
+								ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+								"Valid cookie");
+								
+								cookie.len = (p1 - header[i].value.data);
+								
+								cookie.len += variable[j].len;
+								cookie.len++;
+								cookie.len += decrypted.len - verification.len;
+								if(p3){
+									cookie.len += (header[i].value.data + header[i].value.len) - p3;
+								}
+								
+								p = cookie.data = ngx_palloc(r->pool, cookie.len);
+								if(p == NULL) {
+									return NGX_ERROR;
+								}
+								
+								p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
+								p = ngx_copy(p, variable[j].data, variable[j].len);
+								p = ngx_copy(p, "=", 1);
+								p = ngx_copy(p, decrypted.data, decrypted.len - verification.len);
+								if(p3){
+									p = ngx_copy(p, p3, (header[i].value.data + header[i].value.len) - p3);
+								}
+								
+								header[i].value.len = cookie.len;
+								header[i].value.data = cookie.data;
+								
+								done = 1;
+								
+								ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+									"Session Binding Proxy cookie to backend: \"%V: %V\"",
+									&header[i].key, &header[i].value);
 							}
-							
-							p = cookie.data = ngx_palloc(r->pool, cookie.len);
-							if(p == NULL) {
-								return NGX_ERROR;
-							}
-							
-							p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
-							p = ngx_copy(p, name.data, name.len);
-							p = ngx_copy(p, decrypted.data, decrypted.len - verification.len);
-							if(p3){
-								p = ngx_copy(p, p3, (header[i].value.data + header[i].value.len) - p3);
-							}
-							
-							header[i].value.len = cookie.len;
-							header[i].value.data = cookie.data;
-							
-							done = 1;
-							
-							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-								"Session Binding Proxy cookie to backend: \"%V: %V\"",
-								&header[i].key, &header[i].value);
 						}
 					}
-				}
-				else {
-					ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-								"Session Binding Proxy can't decrypt cookie");
-					dst = NULL;
-					len = 0;
+					else {
+						ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+									"Session Binding Proxy can't decrypt cookie");
+						dst = NULL;
+						len = 0;
+					}
 				}
 			}
 		}
@@ -317,14 +323,16 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 
-    static ngx_str_t					name = ngx_string("s_session_id="), verification = ngx_string("+session_binding_proxy");
-	ngx_str_t							arg, value, res, iv;
-	ngx_uint_t							i;
+    static ngx_str_t					verification = ngx_string("+session_binding_proxy");
+	ngx_str_t							arg, value, res, iv, *variable;
+	ngx_uint_t							i,j;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
 	u_char								*p, *p1, *p2, *dst;
 	size_t								len;
     ngx_int_t							rc;
+	
+	variable = splcf->variables->elts;
 	
 	if (r->connection->ssl) {
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
@@ -372,84 +380,88 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 		
 		if(ngx_strncmp((&header[i])->key.data, "Set-Cookie",10) == 0)
 		{
-			if(ngx_strncmp((&header[i])->value.data, name.data, name.len) == 0)
-			{
-				p1 = (u_char *) ngx_strchr((&header[i])->value.data, '=');
-				p2 = (u_char *) ngx_strchr((&header[i])->value.data, ';');
-				
-				arg.len = 0;
-				arg.data = ngx_palloc(r->pool, arg.len);
-				
-				if (p1 && p2) {
-					p1++;
-					arg.len = (((&header[i])->value.data + (&header[i])->value.len) - p1) - (((&header[i])->value.data + (&header[i])->value.len) - p2);
-					arg.data = p1;
-				}
-				
-				value.len = arg.len + verification.len;
-				p = value.data = ngx_palloc(r->pool, value.len);
+			for(j = 0;j<splcf->variables->nelts;j++) {
+				if(ngx_strncmp((&header[i])->value.data, variable[j].data, variable[j].len) != 0)
+					continue;
+				else{
+					p1 = (u_char *) ngx_strchr((&header[i])->value.data, '=');
+					p2 = (u_char *) ngx_strchr((&header[i])->value.data, ';');
+					
+					arg.len = 0;
+					arg.data = ngx_palloc(r->pool, arg.len);
+					
+					if (p1 && p2) {
+						p1++;
+						arg.len = (((&header[i])->value.data + (&header[i])->value.len) - p1) - (((&header[i])->value.data + (&header[i])->value.len) - p2);
+						arg.data = p1;
+					}
+					
+					value.len = arg.len + verification.len;
+					p = value.data = ngx_palloc(r->pool, value.len);
 
-				if(p == NULL) {
-					return NGX_ERROR;
-				}
+					if(p == NULL) {
+						return NGX_ERROR;
+					}
 
-				p = ngx_copy(p, arg.data, arg.len);
-				p = ngx_copy(p, verification.data, verification.len);
-				
-				rc = ngx_http_session_binding_proxy_3des_mac_encrypt(r->pool,
-						r->connection->log, iv.data, iv.len,
-						splcf->key, ngx_http_encrypted_session_key_length,
-						value, &dst, &len);
+					p = ngx_copy(p, arg.data, arg.len);
+					p = ngx_copy(p, verification.data, verification.len);
+					
+					rc = ngx_http_session_binding_proxy_3des_mac_encrypt(r->pool,
+							r->connection->log, iv.data, iv.len,
+							splcf->key, ngx_http_encrypted_session_key_length,
+							value, &dst, &len);
 
-				if (rc != NGX_OK) {
-					dst = NULL;
-					len = 0;
+					if (rc != NGX_OK) {
+						dst = NULL;
+						len = 0;
 
-					ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-							"encrypted_session: failed to encrypt");
-				}
+						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+								"encrypted_session: failed to encrypt");
+					}
 
-				res.data = dst;
-				res.len = len;
-				
-				ngx_str_t encoded;
-				len = ngx_base64_encoded_length(res.len) + 1;
-				p = encoded.data = ngx_pnalloc(r->pool, len);
-				if (p == NULL) {
-					return NGX_ERROR;
-				}
-				ngx_encode_base64(&encoded, &res);
-				encoded.data[encoded.len] = '\0';
-				
-				ngx_str_t cookie_value;
+					res.data = dst;
+					res.len = len;
+					
+					ngx_str_t encoded;
+					len = ngx_base64_encoded_length(res.len) + 1;
+					p = encoded.data = ngx_pnalloc(r->pool, len);
+					if (p == NULL) {
+						return NGX_ERROR;
+					}
+					ngx_encode_base64(&encoded, &res);
+					encoded.data[encoded.len] = '\0';
+					
+					ngx_str_t cookie_value;
 
-				cookie_value.len = name.len; // name of the cookie including the =.
-				cookie_value.len += encoded.len; //length of the encrypted value.
-				cookie_value.len += (((&header[i])->value.data + (&header[i])->value.len) - p2); //length of the rest of the cookie value
-				
-				p = cookie_value.data = ngx_palloc(r->pool, cookie_value.len);
+					cookie_value.len = variable[j].len; // name of the cookie.
+					cookie_value.len++; // =
+					cookie_value.len += encoded.len; //length of the encrypted value.
+					cookie_value.len += (((&header[i])->value.data + (&header[i])->value.len) - p2); //length of the rest of the cookie value
+					
+					p = cookie_value.data = ngx_palloc(r->pool, cookie_value.len);
 
-				if(p == NULL) {
-					return NGX_ERROR;
-				}
-				
-				p = ngx_copy(p, name.data, name.len);
-				p = ngx_copy(p, encoded.data, encoded.len);
-				p = ngx_copy(p, p2, ((&header[i])->value.data + (&header[i])->value.len) - p2);
-				
-				header[i].value.len = cookie_value.len;
-				header[i].value.data = cookie_value.data;
-				
-				ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-					"Session Binding Proxy cookie to client: \"%V: %V\"",
-					&header[i].key, &header[i].value);
+					if(p == NULL) {
+						return NGX_ERROR;
+					}
+					
+					p = ngx_copy(p, variable[j].data, variable[j].len);
+					p = ngx_copy(p, "=", 1);
+					p = ngx_copy(p, encoded.data, encoded.len);
+					p = ngx_copy(p, p2, ((&header[i])->value.data + (&header[i])->value.len) - p2);
+					
+					header[i].value.len = cookie_value.len;
+					header[i].value.data = cookie_value.data;
+					
+					ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+						"Session Binding Proxy cookie to client: \"%V: %V\"",
+						&header[i].key, &header[i].value);
+					}
 			}
 		}
 	}
 	
 	return ngx_http_next_header_filter(r);
 }
-
 
 /*
 The functions below (encrypt and decrypt) are taken from agentzh's encrypted-session nginx module
@@ -643,20 +655,58 @@ evp_error:
 }
 
 static char *
+ngx_http_session_binding_proxy_add_variables(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_http_session_binding_proxy_loc_conf_t		*sbplcf = conf;
+
+    ngx_uint_t										i;
+    ngx_str_t										*value, *variable;
+
+    value = cf->args->elts;
+
+    sbplcf->variables = ngx_array_create(cf->pool,
+        cf->args->nelts-2, sizeof(ngx_str_t));
+
+    if(sbplcf->variables == NULL) {
+        return NGX_CONF_ERROR;
+    }
+
+    for(i = 2;i<cf->args->nelts;i++) {
+        if (value[i].data[0] != '$') {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid variable name \"%V\"", &value[1]);
+            return NGX_CONF_ERROR;
+        }
+
+        variable = ngx_array_push(sbplcf->variables);
+        if(variable == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        value[i].len--;
+        value[i].data++;
+
+        variable->len = value[i].len;
+		variable->data = value[i].data;
+    }
+
+    return NGX_CONF_OK;
+}
+
+static char *
 ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-    //ngx_http_core_loc_conf_t *clcf;
 	ngx_str_t *value;
 	
-	ngx_http_session_binding_proxy_loc_conf_t  *splcf = conf;
+	ngx_http_session_binding_proxy_loc_conf_t  *sbplcf = conf;
 	
-    if (splcf->key != NGX_CONF_UNSET_PTR) {
+    if (sbplcf->key != NGX_CONF_UNSET_PTR) {
         return "is duplicate key";
     }
 	
 	value = cf->args->elts;
 	
-	if(cf->args->nelts !=2) {
+	if(cf->args->nelts < 2) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                "invalid number of arguments for the session_binding_proxy directive");
 		return NGX_CONF_ERROR;
@@ -670,8 +720,12 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 	
-	splcf->enable = 1;
-	splcf->key = value[1].data;
+	if(ngx_http_session_binding_proxy_add_variables(cf, cmd, conf) != NGX_CONF_OK) {
+        return NGX_CONF_ERROR;
+    }
+	
+	sbplcf->enable = 1;
+	sbplcf->key = value[1].data;
 
     return NGX_CONF_OK;
 }
