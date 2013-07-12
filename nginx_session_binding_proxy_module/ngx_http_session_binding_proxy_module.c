@@ -28,7 +28,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <openssl/evp.h>
-#include <openssl/md5.h>
+#include <openssl/sha.h>
 
 #define ngx_strrchr(s1, c)   strrchr((const char *) s1, (int) c)
 
@@ -526,7 +526,7 @@ ngx_int_t ngx_http_session_binding_proxy_3des_mac_encrypt(ngx_pool_t *pool, ngx_
 
     data_size = in.len;
 
-    buf_size = MD5_DIGEST_LENGTH /* for the digest */
+    buf_size = SHA256_DIGEST_LENGTH /* for the digest */
              + (data_size + block_size - 1) /* for EVP_EncryptUpdate */
              + block_size /* for EVP_EncryptFinal */
              ;
@@ -542,9 +542,9 @@ ngx_int_t ngx_http_session_binding_proxy_3des_mac_encrypt(ngx_pool_t *pool, ngx_
 
     ngx_memcpy(data, in.data, in.len);
 
-    MD5(data, data_size, p);
+    SHA256(data, data_size, p);
 
-    p += MD5_DIGEST_LENGTH;
+    p += SHA256_DIGEST_LENGTH;
 
     ret = EVP_EncryptInit(&ctx, cipher, key, iv);
     if (! ret) {
@@ -603,10 +603,10 @@ ngx_http_session_binding_proxy_3des_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log
     u_char *p;
     const u_char *digest;
 
-    u_char new_digest[MD5_DIGEST_LENGTH];
+    u_char new_digest[SHA256_DIGEST_LENGTH];
 
     if (key_len != ngx_http_encrypted_session_key_length
-            || in.len < MD5_DIGEST_LENGTH)
+            || in.len < SHA256_DIGEST_LENGTH)
     {
         return NGX_ERROR;
     }
@@ -635,8 +635,8 @@ ngx_http_session_binding_proxy_3des_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log
 
     *dst = p;
 
-    ret = EVP_DecryptUpdate(&ctx, p, &len, in.data + MD5_DIGEST_LENGTH,
-            in.len - MD5_DIGEST_LENGTH);
+    ret = EVP_DecryptUpdate(&ctx, p, &len, in.data + SHA256_DIGEST_LENGTH,
+            in.len - SHA256_DIGEST_LENGTH);
 
     if (! ret) {
         goto evp_error;
@@ -668,11 +668,11 @@ ngx_http_session_binding_proxy_3des_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log
         return NGX_ERROR;
     }
 
-    MD5(*dst, *dst_len, new_digest);
+    SHA256(*dst, *dst_len, new_digest);
 
-    if (ngx_strncmp(digest, new_digest, MD5_DIGEST_LENGTH) != 0) {
+    if (ngx_strncmp(digest, new_digest, SHA256_DIGEST_LENGTH) != 0) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0,
-                "failed to decrypt session: MD5 checksum mismatch.");
+                "failed to decrypt session: SHA256 checksum mismatch.");
 
         return NGX_ERROR;
     }
