@@ -33,8 +33,10 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define ngx_strrchr(s1, c)   strrchr((const char *) s1, (int) c)
 
 enum {
-    ngx_http_encrypted_session_key_length = 256 / 8,
-    ngx_http_encrypted_session_iv_length = EVP_MAX_IV_LENGTH
+    ngx_http_encrypted_session_key_length = 256 / 8 * 2,
+		//256 bits devided by 8 to get the bytes * 2 to get the number of hexadecimal chars.
+    ngx_http_encrypted_session_iv_length = EVP_MAX_IV_LENGTH,
+	MAX_RANDOM_STRING = 64
 };
 
 /**
@@ -42,7 +44,7 @@ Define the location configuration for SBP
 */
 typedef struct {
 	ngx_flag_t					enable;
-	u_char						*key;
+	ngx_str_t					key;
 	ngx_array_t					*variables;
 } ngx_http_session_binding_proxy_loc_conf_t;
 
@@ -53,14 +55,16 @@ static char *ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, 
 static void *ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_session_binding_proxy_init(ngx_conf_t *cf);
-ngx_int_t ngx_http_session_binding_proxy_3des_mac_encrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in,
 		u_char **dst, size_t *dst_len);
-ngx_int_t ngx_http_session_binding_proxy_3des_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_int_t ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in, u_char **dst,
         size_t *dst_len);
+
+ngx_int_t ngx_http_session_binding_proxy_generate_random_string(ngx_str_t *res, ngx_int_t length);
 
 static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 
@@ -125,7 +129,7 @@ ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf)
     }
 	
 	conf->enable = NGX_CONF_UNSET;
-	conf->key = NGX_CONF_UNSET_PTR;
+	//conf->key = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -138,8 +142,9 @@ ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 	
 	ngx_conf_merge_value(conf->enable, prev->enable, 0);
 	
-	ngx_conf_merge_ptr_value(conf->key, prev->key,
-            NULL);
+	ngx_conf_merge_str_value(conf->key, prev->key, NULL);
+	
+	//ngx_conf_merge_ptr_value(conf->key, prev->key, NULL);
 
     return NGX_CONF_OK;
 }
@@ -157,14 +162,13 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 		return NGX_DECLINED;
 	}
 	
-	if (splcf->key == NULL) {
+	if (splcf->key.data == NULL) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                 "session_binding_proxy: a key is required to be defined");
-
         return NGX_ERROR;
     }
 	
-	ngx_str_t							iv;
+	ngx_str_t							master_key;
 	
 	//Check if we indeed have an SSL connection
 	if (r->connection->ssl) {
@@ -172,18 +176,9 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 		if (ssl_session) {
 			uint64_t* mkey = (uint64_t*)ssl_session->master_key;
 			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL %016xL %016xL",*(mkey),*(mkey+1),*(mkey+2));
-			iv.len = ssl_session->master_key_length/3;
-			iv.data = ngx_pnalloc(r->pool, iv.len);
-			ngx_snprintf(iv.data, iv.len, "%016xL", *mkey);
-			
-			if (iv.len > ngx_http_encrypted_session_iv_length) {
-				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-						"encrypted_session_iv: the init vector must NOT "
-						"be longer than %d bytes",
-						ngx_http_encrypted_session_iv_length);
-
-				return NGX_ERROR;
-			}
+			master_key.len = ssl_session->master_key_length/3;
+			master_key.data = ngx_pnalloc(r->pool, master_key.len);
+			ngx_snprintf(master_key.data, master_key.len, "%016xL", *mkey);
 		}
 	}
 	else {
@@ -191,27 +186,25 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 		return NGX_ERROR;
 	}
 	
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-						"Session Binding Proxy Handler IV: %V", &iv);
-	
 	/**
 	define most variables here now that we know the module is enabled and a proper key is set
 	*/
 	static ngx_str_t					verification = ngx_string("+session_binding_proxy");
-	ngx_uint_t i,j;
+	ngx_uint_t							i,j;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
-	u_char								*p, *p1, *p2, *p3, *p4, *dst;
-	ngx_str_t							arg,cookie, *variable;
+	u_char								*p, *p1, *p2, *p3, *p4, *p5, *dst;
+	ngx_str_t							iv, arg, cookie, *variable;
 	size_t								len;
 	ngx_int_t							rc;
 	
 	variable = splcf->variables->elts;
 	part = &r->headers_in.headers.part;
 	header = part->elts;
+	iv.len = 0;
+	iv.data = NULL;
 
 	for (i = 0; /* void */; i++) { //For each header
-
 		if (i >= part->nelts) {
 			if (part->next == NULL) {
 				break;
@@ -231,18 +224,31 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 				ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 							"Session Binding Proxy Handler in string: %V", &((&header[i])->value));
 				
-				if((p1 = (u_char *) ngx_strstr(((&header[i])->value).data, variable[j].data)) != NULL) //find the cookie value
+				if((p1 = (u_char *) ngx_strstr(((&header[i])->value).data, variable[j].data)) != NULL) //find the cookie value and iv
 				{	
 					p2 = (u_char *) ngx_strchr(p1, '=');
-					p3 = (u_char *) ngx_strchr(p1, ';');
+					p3 = (u_char *) ngx_strchr(p1, '-');
+					p4 = (u_char *) ngx_strchr(p1, ';');
 					
-					if (p2) {
+					if(p2) {
 						p2++;
-						arg.len = ((&header[i])->value.data + (&header[i])->value.len) - p2;
+						iv.len = ((&header[i])->value.data + (&header[i])->value.len) - p2;
 						if(p3){
-							arg.len -= ((&header[i])->value.data + (&header[i])->value.len) - p3;
+							iv.len -= ((&header[i])->value.data + (&header[i])->value.len) - p3;
+							p3++;
+							arg.len = ((&header[i])->value.data + (&header[i])->value.len) - p3;
+							if(p4){
+								arg.len -= ((&header[i])->value.data + (&header[i])->value.len) - p4;
+							}
+							arg.data = p3;
 						}
-						arg.data = p2;
+						iv.data = p2;
+					}
+					
+					if(iv.data == NULL){
+						ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+							"could not get the IV back from incoming cookie");
+						return NGX_ERROR;
 					}
 					
 					ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -259,9 +265,9 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 					decoded.data[decoded.len] = '\0';
 					
 					// decrypt the cookie value
-					rc = ngx_http_session_binding_proxy_3des_mac_decrypt(r->pool,
+					rc = ngx_http_session_binding_proxy_aes_mac_decrypt(r->pool,
 						r->connection->log, iv.data, iv.len,
-						splcf->key, ngx_http_encrypted_session_key_length,
+						splcf->key.data, ngx_http_encrypted_session_key_length,
 						decoded, &dst, &len);
 
 					if (rc == NGX_OK) {
@@ -273,21 +279,20 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 									"Session Binding Proxy decrypted: %V",
 									&decrypted);
 						
-						p4 = (u_char *) ngx_strrchr(decrypted.data, '+');
+						p5 = (u_char *) ngx_strrchr(decrypted.data, '+');
 						
-						if (p4) {// a valid cookie value contains the string "+session_binding_proxy", find it
-							if (ngx_memcmp(p4,verification.data,decrypted.data + decrypted.len - p4) == 0) {
+						if (p5) {// a valid cookie value contains the string "+session_binding_proxy", find it
+							if (ngx_memcmp(p5,verification.data,decrypted.data + decrypted.len - p5) == 0) {
 								ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 								"Valid cookie");
 								
 								//get the actual value of the cookie for the backend server
 								cookie.len = (p1 - header[i].value.data);
-								
 								cookie.len += variable[j].len;
 								cookie.len++;
 								cookie.len += decrypted.len - verification.len;
-								if(p3){
-									cookie.len += (header[i].value.data + header[i].value.len) - p3;
+								if(p4){
+									cookie.len += (header[i].value.data + header[i].value.len) - p4;
 								}
 								
 								p = cookie.data = ngx_palloc(r->pool, cookie.len);
@@ -300,8 +305,8 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 								p = ngx_copy(p, variable[j].data, variable[j].len);
 								p = ngx_copy(p, "=", 1);
 								p = ngx_copy(p, decrypted.data, decrypted.len - verification.len);
-								if(p3){
-									p = ngx_copy(p, p3, (header[i].value.data + header[i].value.len) - p3);
+								if(p4){
+									p = ngx_copy(p, p4, (header[i].value.data + header[i].value.len) - p4);
 								}
 								
 								//replace the cookie header with this decrypted one
@@ -342,14 +347,14 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 		return ngx_http_next_header_filter(r);
 	}
 	
-	if (splcf->key == NULL) {
+	if (splcf->key.data == NULL) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                 "session_binding_proxy: a key is required to be defined");
 
         return NGX_ERROR;
     }
 
-	ngx_str_t							iv;
+	ngx_str_t							master_key;
 	
 	//check if we indeed have an SSL connection
 	if (r->connection->ssl) {
@@ -357,18 +362,9 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 		if (ssl_session) {
 			uint64_t* mkey = (uint64_t*)ssl_session->master_key;
 			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL %016xL %016xL",*(mkey),*(mkey+1),*(mkey+2));
-			iv.len = ssl_session->master_key_length/3;
-			iv.data = ngx_pnalloc(r->pool, iv.len);
-			ngx_snprintf(iv.data, iv.len, "%016xL", *mkey);
-			
-			if (iv.len > ngx_http_encrypted_session_iv_length) {
-				ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-						"encrypted_session_iv: the init vector must NOT "
-						"be longer than %d bytes",
-						ngx_http_encrypted_session_iv_length);
-
-				return NGX_ERROR;
-			}
+			master_key.len = ssl_session->master_key_length/3;
+			master_key.data = ngx_pnalloc(r->pool, master_key.len);
+			ngx_snprintf(master_key.data, master_key.len, "%016xL", *mkey);
 		}
 	}
 	else {
@@ -376,8 +372,42 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 		return NGX_ERROR;
 	}
 	
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+	ngx_str_t							iv;
+	iv.data = ngx_pnalloc(r->pool, ngx_http_encrypted_session_iv_length);
+    if (iv.data == NULL) {
+        return NGX_ERROR;
+    }
+	
+	switch(ngx_http_session_binding_proxy_generate_random_string(&(iv), ngx_http_encrypted_session_iv_length))
+	{
+		case 0:
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 						"Session Binding Proxy Filter IV: %V", &iv);
+			break;
+		case 1:
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+				"set_secure_random: could not open /dev/urandom");
+			return NGX_ERROR;
+			break;
+		case 2:
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+				"set_secure_random: could not read all %i byte(s) from "
+				"/dev/urandom", ngx_http_encrypted_session_iv_length);
+			return NGX_ERROR;
+			break;
+		default:
+			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+				"Something went wrong when generating the IV");
+			return NGX_ERROR;
+	}
+	
+	if (iv.len > ngx_http_encrypted_session_iv_length) {
+		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+				"encrypted_session_iv: the init vector must NOT "
+				"be longer than %d bytes",
+				ngx_http_encrypted_session_iv_length);
+		return NGX_ERROR;
+	}
 	
 	// Define most variables here after the checks
 	static ngx_str_t					verification = ngx_string("+session_binding_proxy");
@@ -437,9 +467,9 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					p = ngx_copy(p, verification.data, verification.len);
 					
 					//encrypt the value
-					rc = ngx_http_session_binding_proxy_3des_mac_encrypt(r->pool,
+					rc = ngx_http_session_binding_proxy_aes_mac_encrypt(r->pool,
 							r->connection->log, iv.data, iv.len,
-							splcf->key, ngx_http_encrypted_session_key_length,
+							splcf->key.data, ngx_http_encrypted_session_key_length,
 							value, &dst, &len);
 
 					if (rc != NGX_OK) {
@@ -467,6 +497,8 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					ngx_str_t cookie_value;
 					cookie_value.len = variable[j].len; // name of the cookie.
 					cookie_value.len++; // =
+					cookie_value.len += iv.len; // include the iv
+					cookie_value.len++; // - include a dash to separate iv from cookie value
 					cookie_value.len += encoded.len; //length of the encrypted value.
 					cookie_value.len += (((&header[i])->value.data + (&header[i])->value.len) - p2); //length of the rest of the cookie value
 					
@@ -478,6 +510,8 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					
 					p = ngx_copy(p, variable[j].data, variable[j].len);
 					p = ngx_copy(p, "=", 1);
+					p = ngx_copy(p, iv.data, iv.len);
+					p = ngx_copy(p, "-", 1);
 					p = ngx_copy(p, encoded.data, encoded.len);
 					p = ngx_copy(p, p2, ((&header[i])->value.data + (&header[i])->value.len) - p2);
 					
@@ -501,7 +535,7 @@ The functions below (encrypt and decrypt) are taken from agentzh's encrypted-ses
 Modified slightly for use in this module
 see https://github.com/agentzh/encrypted-session-nginx-module for details
 */
-ngx_int_t ngx_http_session_binding_proxy_3des_mac_encrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in,
 		u_char **dst, size_t *dst_len)
@@ -575,7 +609,7 @@ ngx_int_t ngx_http_session_binding_proxy_3des_mac_encrypt(ngx_pool_t *pool, ngx_
 
     if (*dst_len > buf_size) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                "encrypted_session: 3des_mac_encrypt: buffer error");
+                "encrypted_session: aes_mac_encrypt: buffer error");
 
         return NGX_ERROR;
     }
@@ -590,7 +624,7 @@ evp_error:
 }
 
 ngx_int_t
-ngx_http_session_binding_proxy_3des_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in, u_char **dst,
         size_t *dst_len)
@@ -663,7 +697,7 @@ ngx_http_session_binding_proxy_3des_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log
 
     if (*dst_len > buf_size) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                "encrypted_session: 3des_mac_decrypt: buffer error");
+                "encrypted_session: aes_mac_decrypt: buffer error");
 
         return NGX_ERROR;
     }
@@ -687,6 +721,42 @@ evp_error:
 }
 
 /**
+Generate a string of random hexadecimal characters
+*/
+ngx_int_t
+ngx_http_session_binding_proxy_generate_random_string(ngx_str_t *res, ngx_int_t length)
+{	
+	static u_char alphabet[] = "ABCDEF0123456789";
+								
+	u_char			entropy[MAX_RANDOM_STRING];
+	u_char			output[MAX_RANDOM_STRING];
+	ngx_int_t		i;
+	ngx_fd_t		fd;
+	ssize_t			n;
+	
+	fd = ngx_open_file("/dev/urandom", NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+	if (fd == NGX_INVALID_FILE) {
+		return 1;
+	}
+	
+	n = ngx_read_fd(fd, entropy, length);
+	if (n != length) {
+		return 2;
+	}
+
+	ngx_close_file(fd);
+	
+	for (i = 0; i < length; i++) {
+		output[i] = alphabet[ entropy[i] % (sizeof alphabet - 1) ];
+	}
+	
+	ngx_memcpy(res->data,output,length);
+	res->len = length;
+	
+	return 0;
+}
+
+/**
 Read cookie names from the conf file
 */
 static char *
@@ -700,13 +770,13 @@ ngx_http_session_binding_proxy_add_variables(ngx_conf_t *cf, ngx_command_t *cmd,
     value = cf->args->elts;
 
     sbplcf->variables = ngx_array_create(cf->pool,
-        cf->args->nelts-2, sizeof(ngx_str_t));
+        cf->args->nelts-1, sizeof(ngx_str_t));
 
     if(sbplcf->variables == NULL) {
         return NGX_CONF_ERROR;
     }
 
-    for(i = 2;i<cf->args->nelts;i++) {
+    for(i = 1;i<cf->args->nelts;i++) {
         if (value[i].data[0] != '$') {
             ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                "invalid variable name \"%V\"", &value[1]);
@@ -735,36 +805,51 @@ It reads all parameters in the conf for the session_binding_proxy directive.
 static char *
 ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
-	ngx_str_t *value;
-	
 	ngx_http_session_binding_proxy_loc_conf_t  *sbplcf = conf;
 	
-    if (sbplcf->key != NGX_CONF_UNSET_PTR) {
-        return "is duplicate key";
-    }
-	
-	value = cf->args->elts;
-	
-	if(cf->args->nelts < 2) {
+	if(cf->args->nelts < 1) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                "invalid number of arguments for the session_binding_proxy directive");
 		return NGX_CONF_ERROR;
 	}
 	
-	if (value[1].len != ngx_http_encrypted_session_key_length) {
-        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                "encrypted_session_key: the key must be of %d bytes long",
-                ngx_http_encrypted_session_key_length);
-
+	sbplcf->key.data = ngx_palloc(cf->pool, ngx_http_encrypted_session_key_length);
+    if (sbplcf->key.data == NULL) {
         return NGX_CONF_ERROR;
     }
+	
+	switch(ngx_http_session_binding_proxy_generate_random_string(&(sbplcf->key), ngx_http_encrypted_session_key_length))
+	{
+		case 0:
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+				"key: %V",&(sbplcf->key));
+			break;
+		case 1:
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+				"set_secure_random: could not open /dev/urandom");
+			return NGX_CONF_ERROR;
+			break;
+		case 2:
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+				"set_secure_random: could not read all %i byte(s) from "
+				"/dev/urandom", ngx_http_encrypted_session_key_length);
+			return NGX_CONF_ERROR;
+			break;
+		default:
+			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+				"Something went wrong when generating the key");
+			return NGX_CONF_ERROR;
+	}
+	
+	/*if(ngx_http_session_binding_proxy_generate_key(cf, conf) != NGX_CONF_OK) {
+		return NGX_CONF_ERROR;
+	}*/
 	
 	if(ngx_http_session_binding_proxy_add_variables(cf, cmd, conf) != NGX_CONF_OK) {
         return NGX_CONF_ERROR;
     }
 	
 	sbplcf->enable = 1;
-	sbplcf->key = value[1].data;
 
     return NGX_CONF_OK;
 }
