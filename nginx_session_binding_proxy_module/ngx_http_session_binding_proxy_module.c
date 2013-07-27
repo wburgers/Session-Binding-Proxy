@@ -33,9 +33,9 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define ngx_strrchr(s1, c)   strrchr((const char *) s1, (int) c)
 
 enum {
-    ngx_http_encrypted_session_key_length = 256 / 8 * 2,
+    ngx_http_sbp_key_length = 256 / 8 * 2,
 		//256 bits devided by 8 to get the bytes * 2 to get the number of hexadecimal chars.
-    ngx_http_encrypted_session_iv_length = EVP_MAX_IV_LENGTH,
+    ngx_http_sbp_iv_length = EVP_MAX_IV_LENGTH,
 	MAX_RANDOM_STRING = 64
 };
 
@@ -52,6 +52,7 @@ typedef struct {
 Define the functions in this module
 */
 static char *ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char *ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void *ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_session_binding_proxy_init(ngx_conf_t *cf);
@@ -72,12 +73,20 @@ static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
 Define the directive for SBP and which function to call when it is read in the conf
 */
 static ngx_command_t ngx_http_session_binding_proxy_commands[] = {
-    { ngx_string("session_binding_proxy"),
-      NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
-      ngx_http_session_binding_proxy,
-      NGX_HTTP_LOC_CONF_OFFSET,
-      0,
-      NULL },
+	{	ngx_string("session_binding_proxy"),
+		NGX_HTTP_LOC_CONF|NGX_CONF_1MORE,
+		ngx_http_session_binding_proxy,
+		NGX_HTTP_LOC_CONF_OFFSET,
+		0,
+		NULL
+	},
+	{	ngx_string("session_binding_proxy_key"),
+		NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+		ngx_http_session_binding_proxy_key,
+		NGX_HTTP_LOC_CONF_OFFSET,
+		0,
+		NULL
+    },
  
     ngx_null_command
 };
@@ -407,12 +416,12 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	}
 	
 	ngx_str_t							iv;
-	iv.data = ngx_pnalloc(r->pool, ngx_http_encrypted_session_iv_length);
+	iv.data = ngx_pnalloc(r->pool, ngx_http_sbp_iv_length);
     if (iv.data == NULL) {
         return NGX_ERROR;
     }
 	
-	switch(ngx_http_session_binding_proxy_generate_random_string(&(iv), ngx_http_encrypted_session_iv_length))
+	switch(ngx_http_session_binding_proxy_generate_random_string(&(iv), ngx_http_sbp_iv_length))
 	{
 		case 0:
 			ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -426,7 +435,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 		case 2:
 			ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
 				"set_secure_random: could not read all %i byte(s) from "
-				"/dev/urandom", ngx_http_encrypted_session_iv_length);
+				"/dev/urandom", ngx_http_sbp_iv_length);
 			return NGX_ERROR;
 			break;
 		default:
@@ -435,11 +444,11 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 			return NGX_ERROR;
 	}
 	
-	if (iv.len > ngx_http_encrypted_session_iv_length) {
+	if (iv.len > ngx_http_sbp_iv_length) {
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
 				"encrypted_session_iv: the init vector must NOT "
 				"be longer than %d bytes",
-				ngx_http_encrypted_session_iv_length);
+				ngx_http_sbp_iv_length);
 		return NGX_ERROR;
 	}
 	
@@ -613,7 +622,7 @@ ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_l
     size_t block_size, buf_size, data_size;
     int len;
 
-    if (key_len != ngx_http_encrypted_session_key_length)
+    if (key_len != ngx_http_sbp_key_length)
     {
         return NGX_ERROR;
     }
@@ -705,7 +714,7 @@ ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
 
     u_char new_digest[SHA256_DIGEST_LENGTH];
 
-    if (key_len != ngx_http_encrypted_session_key_length
+    if (key_len != ngx_http_sbp_key_length
             || in.len < SHA256_DIGEST_LENGTH)
     {
         return NGX_ERROR;
@@ -879,12 +888,12 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 		return NGX_CONF_ERROR;
 	}
 	
-	sbplcf->key.data = ngx_palloc(cf->pool, ngx_http_encrypted_session_key_length);
+	sbplcf->key.data = ngx_palloc(cf->pool, ngx_http_sbp_key_length);
     if (sbplcf->key.data == NULL) {
         return NGX_CONF_ERROR;
     }
 	
-	switch(ngx_http_session_binding_proxy_generate_random_string(&(sbplcf->key), ngx_http_encrypted_session_key_length))
+	switch(ngx_http_session_binding_proxy_generate_random_string(&(sbplcf->key), ngx_http_sbp_key_length))
 	{
 		case 0:
 			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -898,7 +907,7 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 		case 2:
 			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
 				"set_secure_random: could not read all %i byte(s) from "
-				"/dev/urandom", ngx_http_encrypted_session_key_length);
+				"/dev/urandom", ngx_http_sbp_key_length);
 			return NGX_CONF_ERROR;
 			break;
 		default:
@@ -907,10 +916,6 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 			return NGX_CONF_ERROR;
 	}
 	
-	/*if(ngx_http_session_binding_proxy_generate_key(cf, conf) != NGX_CONF_OK) {
-		return NGX_CONF_ERROR;
-	}*/
-	
 	if(ngx_http_session_binding_proxy_add_variables(cf, cmd, conf) != NGX_CONF_OK) {
         return NGX_CONF_ERROR;
     }
@@ -918,6 +923,38 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 	sbplcf->enable = 1;
 
     return NGX_CONF_OK;
+}
+
+/**
+This function is called when the directive is specified in the conf file.
+It reads all parameters in the conf for the session_binding_proxy_key directive.
+*/
+static char *
+ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+	ngx_str_t									*value;
+	ngx_http_session_binding_proxy_loc_conf_t	*sbplcf = conf;
+	
+	if(cf->args->nelts != 2) {
+		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                               "invalid number of arguments for the session_binding_proxy_key directive");
+		return NGX_CONF_ERROR;
+	}
+	
+	value = cf->args->elts;
+	
+	if (value[1].len != ngx_http_sbp_key_length) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                "session_binding_proxy_key: the key must be of %d bytes long",
+                ngx_http_sbp_key_length);
+
+        return NGX_CONF_ERROR;
+    }
+	
+	sbplcf->key.len = ngx_http_sbp_key_length;
+	sbplcf->key.data = value[1].data;
+	
+	return NGX_CONF_OK;
 }
 
 /**
