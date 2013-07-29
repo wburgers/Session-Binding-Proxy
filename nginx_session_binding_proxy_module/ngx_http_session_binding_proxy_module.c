@@ -56,11 +56,11 @@ static char *ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *c
 static void *ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_session_binding_proxy_init(ngx_conf_t *cf);
-ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_int_t ngx_http_session_binding_proxy_aes_encrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in,
 		u_char **dst, size_t *dst_len);
-ngx_int_t ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_int_t ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in, u_char **dst,
         size_t *dst_len);
@@ -185,10 +185,10 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
 		if (ssl_session) {
 			uint64_t* mkey = (uint64_t*)ssl_session->master_key;
-			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL %016xL %016xL",*(mkey),*(mkey+1),*(mkey+2));
-			master_key.len = ssl_session->master_key_length/3;
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
+			master_key.len = ssl_session->master_key_length;
 			master_key.data = ngx_pnalloc(r->pool, master_key.len);
-			ngx_snprintf(master_key.data, master_key.len, "%016xL", *mkey);
+			ngx_snprintf(master_key.data, master_key.len, "%016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
 		}
 	}
 	else {
@@ -203,8 +203,9 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 	ngx_uint_t							i,j;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
-	u_char								*p, *p1, *p2, *p3, *p4, *p5, *dst;
-	ngx_str_t							iv, arg, cookie, concatkey, digest, deckey, *variable;
+	u_char								*p, *p1, *p2, *p3, *p4, *p5, *dst, hash[SHA256_DIGEST_LENGTH];
+	char								mdString[SHA256_DIGEST_LENGTH*2+1];
+	ngx_str_t							iv, arg, cookie, concatkey, deckey, *variable;
 	size_t								len;
 	ngx_int_t							rc;
 	
@@ -216,31 +217,23 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 
 	concatkey.len = sbplcf->key.len; //create the concatkey variable
 	concatkey.len += master_key.len;
-	concatkey.data = ngx_pcalloc(r->pool, concatkey.len);
+	p = concatkey.data = ngx_pcalloc(r->pool, concatkey.len);
 	if (concatkey.data == NULL) {
         return NGX_ERROR;
     }
 	
-	concatkey.data = ngx_copy(concatkey.data, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
-	concatkey.data = ngx_copy(concatkey.data, master_key.data, master_key.len);
+	p = ngx_copy(p, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
+	p = ngx_copy(p, master_key.data, master_key.len);
 	
-	digest.len = SHA256_DIGEST_LENGTH;
-	digest.data = ngx_palloc(r->pool, digest.len);
-	if (digest.data == NULL) {
-        return NGX_ERROR;
-    }
-	
-	SHA256(concatkey.data, concatkey.len, digest.data); //hash the two keys. The output is the encryption/decryption key for this ssl connection.
+	SHA256(concatkey.data, concatkey.len, hash); //hash the two keys. The output is the encryption/decryption key for this ssl connection.
 	
 	deckey.len = SHA256_DIGEST_LENGTH*2; //hex representation of the key for use with AES
-	deckey.data = ngx_pcalloc(r->pool, deckey.len);
-	if (deckey.data == NULL) {
-        return NGX_ERROR;
-    }
 	
     for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-        ngx_snprintf(deckey.data+(i*2), 2, "%2x", digest.data[i]);
+        sprintf(&mdString[i*2],"%02X", (unsigned int) hash[i]); //ngx_sprintf can't print to char array, so we need the normal sprintf
     }
+	
+	deckey.data = (u_char*) &mdString[0]; //use this char array as the data for the key string. Bit messy, but it works.
 	
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 						"Session Binding Proxy encryption/decryption key: %V",
@@ -307,7 +300,7 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 					decoded.data[decoded.len] = '\0';
 					
 					// decrypt the cookie value
-					rc = ngx_http_session_binding_proxy_aes_mac_decrypt(r->pool,
+					rc = ngx_http_session_binding_proxy_aes_decrypt(r->pool,
 						r->connection->log, iv.data, iv.len,
 						deckey.data, deckey.len,
 						decoded, &dst, &len);
@@ -404,10 +397,10 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
 		if (ssl_session) {
 			uint64_t* mkey = (uint64_t*)ssl_session->master_key;
-			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL %016xL %016xL",*(mkey),*(mkey+1),*(mkey+2));
-			master_key.len = ssl_session->master_key_length/3;
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
+			master_key.len = ssl_session->master_key_length;
 			master_key.data = ngx_pnalloc(r->pool, master_key.len);
-			ngx_snprintf(master_key.data, master_key.len, "%016xL", *mkey);
+			ngx_snprintf(master_key.data, master_key.len, "%016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
 		}
 	}
 	else {
@@ -446,7 +439,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	
 	if (iv.len > ngx_http_sbp_iv_length) {
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-				"encrypted_session_iv: the init vector must NOT "
+				"Session Binding Proxy: the init vector must NOT "
 				"be longer than %d bytes",
 				ngx_http_sbp_iv_length);
 		return NGX_ERROR;
@@ -454,11 +447,12 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	
 	// Define most variables here after the checks
 	static ngx_str_t					verification = ngx_string("+session_binding_proxy");
-	ngx_str_t							arg, value, res, concatkey, digest, enckey, *variable;
+	ngx_str_t							arg, value, res, concatkey, enckey, *variable;
 	ngx_uint_t							i,j;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
-	u_char								*p, *p1, *p2, *dst;
+	u_char								*p, *p1, *p2, *dst, hash[SHA256_DIGEST_LENGTH];
+	char								mdString[SHA256_DIGEST_LENGTH*2+1];
 	size_t								len;
     ngx_int_t							rc;
 	
@@ -470,31 +464,23 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	
 	concatkey.len = sbplcf->key.len; //create the concatkey variable
 	concatkey.len += master_key.len;
-	concatkey.data = ngx_pcalloc(r->pool, concatkey.len);
+	p = concatkey.data = ngx_pcalloc(r->pool, concatkey.len);
 	if (concatkey.data == NULL) {
         return NGX_ERROR;
     }
 	
-	concatkey.data = ngx_copy(concatkey.data, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
-	concatkey.data = ngx_copy(concatkey.data, master_key.data, master_key.len);
+	p = ngx_copy(p, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
+	p = ngx_copy(p, master_key.data, master_key.len);
 	
-	digest.len = SHA256_DIGEST_LENGTH;
-	digest.data = ngx_palloc(r->pool, digest.len);
-	if (digest.data == NULL) {
-        return NGX_ERROR;
-    }
-	
-	SHA256(concatkey.data, concatkey.len, digest.data); //hash the two keys. The output is the encryption/decryption key for this ssl connection.
+	SHA256(concatkey.data, concatkey.len, hash); //hash the two keys. The output is the encryption/decryption key for this ssl connection.
 	
 	enckey.len = SHA256_DIGEST_LENGTH*2; //hex representation of the key for use with AES
-	enckey.data = ngx_pcalloc(r->pool, enckey.len);
-	if (enckey.data == NULL) {
-        return NGX_ERROR;
-    }
 	
     for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-        ngx_snprintf(enckey.data+(i*2), 2, "%2x", digest.data[i]);
+        sprintf(&mdString[i*2],"%02X", (unsigned int) hash[i]); //ngx_sprintf can't print to char array, so we need the normal sprintf
     }
+	
+	enckey.data = (u_char*) &mdString[0]; //use this char array as the data for the key string. Bit messy, but it works.
 	
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 						"Session Binding Proxy encryption/decryption key: %V",
@@ -542,7 +528,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					p = ngx_copy(p, verification.data, verification.len);
 					
 					//encrypt the value
-					rc = ngx_http_session_binding_proxy_aes_mac_encrypt(r->pool,
+					rc = ngx_http_session_binding_proxy_aes_encrypt(r->pool,
 							r->connection->log, iv.data, iv.len,
 							enckey.data, enckey.len,
 							value, &dst, &len);
@@ -552,7 +538,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 						len = 0;
 
 						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
-								"encrypted_session: failed to encrypt");
+								"Session Binding Proxy: failed to encrypt");
 					}
 
 					res.data = dst;
@@ -610,7 +596,7 @@ The functions below (encrypt and decrypt) are taken from agentzh's encrypted-ses
 Modified slightly for use in this module
 see https://github.com/agentzh/encrypted-session-nginx-module for details
 */
-ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_int_t ngx_http_session_binding_proxy_aes_encrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in,
 		u_char **dst, size_t *dst_len)
@@ -635,10 +621,8 @@ ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_l
 
     data_size = in.len;
 
-    buf_size = SHA256_DIGEST_LENGTH /* for the digest */
-             + (data_size + block_size - 1) /* for EVP_EncryptUpdate */
-             + block_size /* for EVP_EncryptFinal */
-             ;
+    buf_size =	(data_size + block_size - 1)	/* for EVP_EncryptUpdate */
+				+ block_size; 					/* for EVP_EncryptFinal */
 
     p = ngx_palloc(pool, buf_size + data_size);
     if (p == NULL) {
@@ -650,10 +634,6 @@ ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_l
     data = p + buf_size;
 
     ngx_memcpy(data, in.data, in.len);
-
-    SHA256(data, data_size, p);
-
-    p += SHA256_DIGEST_LENGTH;
 
     ret = EVP_EncryptInit(&ctx, cipher, key, iv);
     if (! ret) {
@@ -669,22 +649,23 @@ ngx_int_t ngx_http_session_binding_proxy_aes_mac_encrypt(ngx_pool_t *pool, ngx_l
 
     p += len;
 
-    ret = EVP_EncryptFinal(&ctx, p, &len);
-    if (! ret) {
+	ret = EVP_EncryptFinal(&ctx, p, &len);
+	
+    /* XXX we should still explicitly release the ctx *
+	* or we'll leak memory here */
+    EVP_CIPHER_CTX_cleanup(&ctx);
+	
+	if (! ret) {
         return NGX_ERROR;
     }
-
-    /* XXX we should still explicitly release the ctx
-* or we'll leak memory here */
-    EVP_CIPHER_CTX_cleanup(&ctx);
-
+	
     p += len;
-
+	
     *dst_len = p - *dst;
 
     if (*dst_len > buf_size) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                "encrypted_session: aes_mac_encrypt: buffer error");
+                "Session Binding Proxy: aes_encrypt: buffer error");
 
         return NGX_ERROR;
     }
@@ -699,7 +680,7 @@ evp_error:
 }
 
 ngx_int_t
-ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in, u_char **dst,
         size_t *dst_len)
@@ -710,17 +691,10 @@ ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
     size_t block_size, buf_size;
     int len;
     u_char *p;
-    const u_char *digest;
 
-    u_char new_digest[SHA256_DIGEST_LENGTH];
-
-    if (key_len != ngx_http_sbp_key_length
-            || in.len < SHA256_DIGEST_LENGTH)
-    {
+    if (key_len != ngx_http_sbp_key_length){
         return NGX_ERROR;
     }
-
-    digest = in.data;
 
     EVP_CIPHER_CTX_init(&ctx);
 
@@ -744,8 +718,8 @@ ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
 
     *dst = p;
 
-    ret = EVP_DecryptUpdate(&ctx, p, &len, in.data + SHA256_DIGEST_LENGTH,
-            in.len - SHA256_DIGEST_LENGTH);
+    ret = EVP_DecryptUpdate(&ctx, p, &len, in.data,
+            in.len);
 
     if (! ret) {
         goto evp_error;
@@ -755,14 +729,13 @@ ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
 
     ret = EVP_DecryptFinal(&ctx, p, &len);
 
-    /* XXX we should still explicitly release the ctx
-* or we'll leak memory here */
+    /* XXX we should still explicitly release the ctx *
+	* or we'll leak memory here */
     EVP_CIPHER_CTX_cleanup(&ctx);
 
     if (! ret) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0,
-                "failed to decrypt session: bad AES-256 digest.");
-
+                "failed to decrypt.");
         return NGX_ERROR;
     }
 
@@ -772,16 +745,7 @@ ngx_http_session_binding_proxy_aes_mac_decrypt(ngx_pool_t *pool, ngx_log_t *log,
 
     if (*dst_len > buf_size) {
         ngx_log_error(NGX_LOG_ERR, log, 0,
-                "encrypted_session: aes_mac_decrypt: buffer error");
-
-        return NGX_ERROR;
-    }
-
-    SHA256(*dst, *dst_len, new_digest);
-
-    if (ngx_strncmp(digest, new_digest, SHA256_DIGEST_LENGTH) != 0) {
-        ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0,
-                "failed to decrypt session: SHA256 checksum mismatch.");
+                "Session Binding Proxy: aes_decrypt: buffer error");
 
         return NGX_ERROR;
     }
