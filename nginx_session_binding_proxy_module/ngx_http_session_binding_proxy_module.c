@@ -56,6 +56,7 @@ static char *ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *c
 static void *ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static ngx_int_t ngx_http_session_binding_proxy_init(ngx_conf_t *cf);
+ngx_int_t ngx_http_session_binding_proxy_sha256_hash(ngx_pool_t *pool, ngx_str_t data, ngx_str_t *dst);
 ngx_int_t ngx_http_session_binding_proxy_aes_encrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in,
@@ -205,7 +206,7 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 	ngx_table_elt_t						*header;
 	u_char								*p, *p1, *p2, *p3, *p4, *p5, *dst, hash[SHA256_DIGEST_LENGTH];
 	char								mdString[SHA256_DIGEST_LENGTH*2+1];
-	ngx_str_t							iv, arg, cookie, concatkey, deckey, *variable;
+	ngx_str_t							iv, arg, MAC, newMAC, cookie, concatkey, deckey, *variable;
 	size_t								len;
 	ngx_int_t							rc;
 	
@@ -298,6 +299,25 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 					}
 					ngx_decode_base64(&decoded, &arg);
 					decoded.data[decoded.len] = '\0';
+					
+					MAC.len = SHA256_DIGEST_LENGTH;
+					MAC.data = decoded.data;
+					
+					decoded.len -= SHA256_DIGEST_LENGTH;
+					decoded.data += SHA256_DIGEST_LENGTH;
+					
+					rc = ngx_http_session_binding_proxy_sha256_hash(r->pool, decoded, &newMAC);
+					if (rc != NGX_OK) {
+						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+								"Session Binding Proxy: failed to generate MAC");
+						return NGX_ERROR;
+					}
+					
+					if (ngx_strncmp(MAC.data, newMAC.data, SHA256_DIGEST_LENGTH) != 0) {
+						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+							"Session Binding Proxy: SHA256 checksum mismatch.");
+						return NGX_ERROR;
+					}
 					
 					// decrypt the cookie value
 					rc = ngx_http_session_binding_proxy_aes_decrypt(r->pool,
@@ -447,7 +467,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	
 	// Define most variables here after the checks
 	static ngx_str_t					verification = ngx_string("+session_binding_proxy");
-	ngx_str_t							arg, value, res, concatkey, enckey, *variable;
+	ngx_str_t							arg, value, encrypted, MAC, res, concatkey, enckey, *variable;
 	ngx_uint_t							i,j;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
@@ -541,9 +561,26 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 								"Session Binding Proxy: failed to encrypt");
 					}
 
-					res.data = dst;
-					res.len = len;
+					encrypted.data = dst;
+					encrypted.len = len;
+					
+					rc = ngx_http_session_binding_proxy_sha256_hash(r->pool, encrypted, &MAC);
+					if (rc != NGX_OK) {
+						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+								"Session Binding Proxy: failed to generate MAC");
+						return NGX_ERROR;
+					}
 
+					res.len = MAC.len;
+					res.len += encrypted.len;
+					p = res.data = ngx_palloc(r->pool, res.len);
+					if (p == NULL) {
+						return NGX_ERROR;
+					}
+					
+					p = ngx_copy(p, MAC.data, MAC.len);
+					p = ngx_copy(p, encrypted.data, encrypted.len);
+					
 					//base64 encode the encrypted value, because otherwise it might not be sendable
 					ngx_str_t encoded;
 					len = ngx_base64_encoded_length(res.len) + 1;
@@ -589,6 +626,19 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	}
 	
 	return ngx_http_next_header_filter(r);
+}
+
+ngx_int_t ngx_http_session_binding_proxy_sha256_hash(ngx_pool_t *pool, ngx_str_t data, ngx_str_t *dst)
+{
+	(*dst).len = SHA256_DIGEST_LENGTH;
+	(*dst).data = ngx_palloc(pool, (*dst).len);
+	if ((*dst).data == NULL) {
+		return NGX_ERROR;
+	}
+	
+	SHA256(data.data, data.len, (*dst).data);
+	
+	return NGX_OK;
 }
 
 /*
