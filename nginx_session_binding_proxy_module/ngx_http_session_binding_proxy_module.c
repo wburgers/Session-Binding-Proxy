@@ -316,69 +316,69 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 					if (ngx_strncmp(MAC.data, newMAC.data, SHA256_DIGEST_LENGTH) != 0) {
 						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
 							"Session Binding Proxy: SHA256 checksum mismatch.");
-						return NGX_ERROR;
-					}
-					
-					// decrypt the cookie value
-					rc = ngx_http_session_binding_proxy_aes_decrypt(r->pool,
-						r->connection->log, iv.data, iv.len,
-						deckey.data, deckey.len,
-						decoded, &dst, &len);
-
-					if (rc == NGX_OK) {
-						ngx_str_t decrypted;
-						decrypted.len = len;
-						decrypted.data = dst;
-						
-						ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-									"Session Binding Proxy decrypted: %V",
-									&decrypted);
-						
-						p5 = (u_char *) ngx_strrchr(decrypted.data, '+');
-						
-						if (p5) {// a valid cookie value contains the string "+session_binding_proxy", find it
-							if (ngx_memcmp(p5,verification.data,decrypted.data + decrypted.len - p5) == 0) {
-								ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-								"Valid cookie");
-								
-								//get the actual value of the cookie for the backend server
-								cookie.len = (p1 - header[i].value.data);
-								cookie.len += variable[j].len;
-								cookie.len++;
-								cookie.len += decrypted.len - verification.len;
-								if(p4){
-									cookie.len += (header[i].value.data + header[i].value.len) - p4;
-								}
-								
-								p = cookie.data = ngx_palloc(r->pool, cookie.len);
-								if(p == NULL) {
-									return NGX_ERROR;
-								}
-								
-								//build the new cookie header
-								p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
-								p = ngx_copy(p, variable[j].data, variable[j].len);
-								p = ngx_copy(p, "=", 1);
-								p = ngx_copy(p, decrypted.data, decrypted.len - verification.len);
-								if(p4){
-									p = ngx_copy(p, p4, (header[i].value.data + header[i].value.len) - p4);
-								}
-								
-								//replace the cookie header with this decrypted one
-								header[i].value.len = cookie.len;
-								header[i].value.data = cookie.data;
-								
-								ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-									"Session Binding Proxy cookie to backend: \"%V: %V\"",
-									&header[i].key, &header[i].value);
-							}
-						}
 					}
 					else {
-						ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-									"Session Binding Proxy can't decrypt cookie");
-						dst = NULL;
-						len = 0;
+						// decrypt the cookie value
+						rc = ngx_http_session_binding_proxy_aes_decrypt(r->pool,
+							r->connection->log, iv.data, iv.len,
+							deckey.data, deckey.len,
+							decoded, &dst, &len);
+
+						if (rc == NGX_OK) {
+							ngx_str_t decrypted;
+							decrypted.len = len;
+							decrypted.data = dst;
+							
+							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+										"Session Binding Proxy decrypted: %V",
+										&decrypted);
+							
+							p5 = (u_char *) ngx_strrchr(decrypted.data, '+');
+							
+							if (p5) {// a valid cookie value contains the string "+session_binding_proxy", find it
+								if (ngx_memcmp(p5,verification.data,decrypted.data + decrypted.len - p5) == 0) {
+									ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+									"Valid cookie");
+									
+									//get the actual value of the cookie for the backend server
+									cookie.len = (p1 - header[i].value.data);
+									cookie.len += variable[j].len;
+									cookie.len++;
+									cookie.len += decrypted.len - verification.len;
+									if(p4){
+										cookie.len += (header[i].value.data + header[i].value.len) - p4;
+									}
+									
+									p = cookie.data = ngx_palloc(r->pool, cookie.len);
+									if(p == NULL) {
+										return NGX_ERROR;
+									}
+									
+									//build the new cookie header
+									p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
+									p = ngx_copy(p, variable[j].data, variable[j].len);
+									p = ngx_copy(p, "=", 1);
+									p = ngx_copy(p, decrypted.data, decrypted.len - verification.len);
+									if(p4){
+										p = ngx_copy(p, p4, (header[i].value.data + header[i].value.len) - p4);
+									}
+									
+									//replace the cookie header with this decrypted one
+									header[i].value.len = cookie.len;
+									header[i].value.data = cookie.data;
+									
+									ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+										"Session Binding Proxy cookie to backend: \"%V: %V\"",
+										&header[i].key, &header[i].value);
+								}
+							}
+						}
+						else {
+							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+										"Session Binding Proxy can't decrypt cookie");
+							dst = NULL;
+							len = 0;
+						}
 					}
 				}
 			}
