@@ -180,6 +180,10 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 	
 	ngx_str_t							master_key;
 	master_key.len = 0;
+	master_key.data = ngx_pcalloc(r->pool, master_key.len);
+	if (master_key.data == NULL) {
+        return NGX_ERROR;
+    }
 	
 	//Check if we indeed have an SSL connection
 	if (r->connection->ssl) {
