@@ -139,7 +139,6 @@ ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf)
     }
 	
 	conf->enable = NGX_CONF_UNSET;
-	//conf->key = NGX_CONF_UNSET;
 
     return conf;
 }
@@ -153,8 +152,6 @@ ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void
 	ngx_conf_merge_value(conf->enable, prev->enable, 0);
 	
 	ngx_conf_merge_str_value(conf->key, prev->key, NULL);
-	
-	//ngx_conf_merge_ptr_value(conf->key, prev->key, NULL);
 
     return NGX_CONF_OK;
 }
@@ -204,11 +201,10 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 	/**
 	define most variables here now that we know the module is enabled and a proper key is set
 	*/
-	static ngx_str_t					verification = ngx_string("+session_binding_proxy");
 	ngx_uint_t							i,j;
 	ngx_list_part_t						*part;
 	ngx_table_elt_t						*header;
-	u_char								*p, *p1, *p2, *p3, *p4, *p5, *dst, hash[SHA256_DIGEST_LENGTH];
+	u_char								*p, *p1, *p2, *p3, *p4, *dst, hash[SHA256_DIGEST_LENGTH];
 	char								mdString[SHA256_DIGEST_LENGTH*2+1];
 	ngx_str_t							iv, arg, MAC, newMAC, cookie, concatkey, deckey, *variable;
 	size_t								len;
@@ -337,45 +333,36 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 										"Session Binding Proxy decrypted: %V",
 										&decrypted);
 							
-							p5 = (u_char *) ngx_strrchr(decrypted.data, '+');
-							
-							if (p5) {// a valid cookie value contains the string "+session_binding_proxy", find it
-								if (ngx_memcmp(p5,verification.data,decrypted.data + decrypted.len - p5) == 0) {
-									ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-									"Valid cookie");
-									
-									//get the actual value of the cookie for the backend server
-									cookie.len = (p1 - header[i].value.data);
-									cookie.len += variable[j].len;
-									cookie.len++;
-									cookie.len += decrypted.len - verification.len;
-									if(p4){
-										cookie.len += (header[i].value.data + header[i].value.len) - p4;
-									}
-									
-									p = cookie.data = ngx_palloc(r->pool, cookie.len);
-									if(p == NULL) {
-										return NGX_ERROR;
-									}
-									
-									//build the new cookie header
-									p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
-									p = ngx_copy(p, variable[j].data, variable[j].len);
-									p = ngx_copy(p, "=", 1);
-									p = ngx_copy(p, decrypted.data, decrypted.len - verification.len);
-									if(p4){
-										p = ngx_copy(p, p4, (header[i].value.data + header[i].value.len) - p4);
-									}
-									
-									//replace the cookie header with this decrypted one
-									header[i].value.len = cookie.len;
-									header[i].value.data = cookie.data;
-									
-									ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-										"Session Binding Proxy cookie to backend: \"%V: %V\"",
-										&header[i].key, &header[i].value);
-								}
+							//get the actual value of the cookie for the backend server
+							cookie.len = (p1 - header[i].value.data);
+							cookie.len += variable[j].len;
+							cookie.len++;
+							cookie.len += decrypted.len;
+							if(p4){
+								cookie.len += (header[i].value.data + header[i].value.len) - p4;
 							}
+							
+							p = cookie.data = ngx_palloc(r->pool, cookie.len);
+							if(p == NULL) {
+								return NGX_ERROR;
+							}
+							
+							//build the new cookie header
+							p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
+							p = ngx_copy(p, variable[j].data, variable[j].len);
+							p = ngx_copy(p, "=", 1);
+							p = ngx_copy(p, decrypted.data, decrypted.len);
+							if(p4){
+								p = ngx_copy(p, p4, (header[i].value.data + header[i].value.len) - p4);
+							}
+							
+							//replace the cookie header with this decrypted one
+							header[i].value.len = cookie.len;
+							header[i].value.data = cookie.data;
+							
+							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+								"Session Binding Proxy cookie to backend: \"%V: %V\"",
+								&header[i].key, &header[i].value);
 						}
 						else {
 							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
@@ -474,7 +461,6 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	}
 	
 	// Define most variables here after the checks
-	static ngx_str_t					verification = ngx_string("+session_binding_proxy");
 	ngx_str_t							arg, value, encrypted, MAC, res, concatkey, enckey, *variable;
 	ngx_uint_t							i,j;
 	ngx_list_part_t						*part;
@@ -535,7 +521,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					p1 = (u_char *) ngx_strchr((&header[i])->value.data, '='); // find the value of the cookie (between = and ;
 					p2 = (u_char *) ngx_strchr((&header[i])->value.data, ';');
 					
-					//copy the cookie value to a new string and add the verification string
+					//copy the cookie value to a new string
 					arg.len = 0;
 					arg.data = ngx_palloc(r->pool, arg.len);
 					
@@ -545,7 +531,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 						arg.data = p1;
 					}
 					
-					value.len = arg.len + verification.len;
+					value.len = arg.len;
 					p = value.data = ngx_palloc(r->pool, value.len);
 
 					if(p == NULL) {
@@ -553,7 +539,6 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					}
 
 					p = ngx_copy(p, arg.data, arg.len);
-					p = ngx_copy(p, verification.data, verification.len);
 					
 					//encrypt the value
 					rc = ngx_http_session_binding_proxy_aes_encrypt(r->pool,
