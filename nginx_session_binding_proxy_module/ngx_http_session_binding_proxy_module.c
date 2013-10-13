@@ -139,6 +139,7 @@ ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf)
     }
 	
 	conf->enable = NGX_CONF_UNSET;
+	conf->variables = NGX_CONF_UNSET_PTR;
 
     return conf;
 }
@@ -150,8 +151,8 @@ ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void
     ngx_http_session_binding_proxy_loc_conf_t *conf = child;
 	
 	ngx_conf_merge_value(conf->enable, prev->enable, 0);
-	
 	ngx_conf_merge_str_value(conf->key, prev->key, NULL);
+	ngx_conf_merge_ptr_value(conf->variables, prev->variables, NULL);
 
     return NGX_CONF_OK;
 }
