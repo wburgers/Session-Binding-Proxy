@@ -224,6 +224,8 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
         return NGX_ERROR;
     }
 	
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"your key: %V",&(sbplcf->key));
+	
 	p = ngx_copy(p, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
 	p = ngx_copy(p, master_key.data, master_key.len);
 	
@@ -905,7 +907,7 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 	{
 		case 0:
 			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-				"key: %V",&(sbplcf->key));
+				"random key: %V",&(sbplcf->key));
 			break;
 		case 1:
 			ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -961,6 +963,9 @@ ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *cmd, void *con
 	
 	sbplcf->key.len = ngx_http_sbp_key_length;
 	sbplcf->key.data = value[1].data;
+	
+	ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+				"random key override: %V",&(sbplcf->key));
 	
 	return NGX_CONF_OK;
 }
