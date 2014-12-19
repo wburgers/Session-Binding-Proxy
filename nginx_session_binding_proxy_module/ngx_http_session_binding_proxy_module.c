@@ -489,6 +489,8 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	p = ngx_copy(p, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
 	p = ngx_copy(p, master_key.data, master_key.len);
 	
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"your key: %V",&(sbplcf->key));
+	
 	SHA256(concatkey.data, concatkey.len, hash); //hash the two keys. The output is the encryption/decryption key for this ssl connection.
 	
 	enckey.len = SHA256_DIGEST_LENGTH*2; //hex representation of the key for use with AES
