@@ -153,6 +153,28 @@ static char* ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void 
     return NGX_CONF_OK;
 }
 
+static void ngx_http_session_binding_proxy_copy_master_secret(const SSL_SESSION *session, unsigned char *master_key_out, size_t *keylen_out) {
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+    *keylen_out = SSL_SESSION_get_master_key(session, master_key_out, SSL_MAX_MASTER_KEY_LENGTH);
+#else
+    if (session->master_key_length > 0) {
+        *keylen_out = session->master_key_length;
+        memcpy(master_key_out, session->master_key,
+                session->master_key_length);
+    }
+#endif
+}
+
+static void ngx_http_session_binding_proxy_convert_to_hex(ngx_str_t master_key_in, ngx_str_t master_key_out) {
+	ngx_uint_t i;
+	for(i = 0; i < master_key_in.len; i++) {
+		unsigned char c1 = ((unsigned char) master_key_in.data[i]) >> 4;
+		unsigned char c2 = master_key_in.data[i] & 0xF;
+		master_key_out.data[2*i] = c1 < 10 ? '0' + c1 : 'A' + c1 - 10;
+		master_key_out.data[2*i+1] = c2 < 10 ? '0' + c2 : 'A' + c2 - 10;
+	}
+}
+
 /**
 Handle incoming requests. If they contain cookies that are specified in the conf, then it will be decrypted.
 */
@@ -171,8 +193,8 @@ static ngx_int_t ngx_http_session_binding_proxy_handler(ngx_http_request_t *r) {
     }
 
 	ngx_str_t master_key;
-	master_key.len = 0;
-	master_key.data = ngx_pcalloc(r->pool, SSL_MAX_MASTER_KEY_LENGTH);
+	master_key.len = SSL_MAX_MASTER_KEY_LENGTH * 2;
+	master_key.data = ngx_pcalloc(r->pool, master_key.len);
 	if (master_key.data == NULL) {
         return NGX_ERROR;
     }
@@ -181,7 +203,16 @@ static ngx_int_t ngx_http_session_binding_proxy_handler(ngx_http_request_t *r) {
 	if (r->connection->ssl) {
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
 		if (ssl_session) {
-			master_key.len = SSL_SESSION_get_master_key(ssl_session, master_key.data, SSL_MAX_MASTER_KEY_LENGTH);
+			ngx_str_t mkey;
+			mkey.data = ngx_pcalloc(r->pool, SSL_MAX_MASTER_KEY_LENGTH);
+			if (mkey.data == NULL) {
+				return NGX_ERROR;
+			}
+			
+			ngx_http_session_binding_proxy_copy_master_secret(ssl_session, mkey.data, &mkey.len);
+			
+			ngx_http_session_binding_proxy_convert_to_hex(mkey, master_key);
+			
 			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %V", &master_key);
 		}
 	}
@@ -391,8 +422,8 @@ static ngx_int_t ngx_http_session_binding_proxy_header_filter(ngx_http_request_t
     }
 
 	ngx_str_t							master_key;
-	master_key.len = 0;
-	master_key.data = ngx_pcalloc(r->pool, SSL_MAX_MASTER_KEY_LENGTH);
+	master_key.len = SSL_MAX_MASTER_KEY_LENGTH * 2;
+	master_key.data = ngx_pcalloc(r->pool, master_key.len);
 	if (master_key.data == NULL) {
         return NGX_ERROR;
     }
@@ -401,7 +432,16 @@ static ngx_int_t ngx_http_session_binding_proxy_header_filter(ngx_http_request_t
 	if (r->connection->ssl) {
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
 		if (ssl_session) {
-			master_key.len = SSL_SESSION_get_master_key(ssl_session, master_key.data, SSL_MAX_MASTER_KEY_LENGTH);
+			ngx_str_t mkey;
+			mkey.data = ngx_pcalloc(r->pool, SSL_MAX_MASTER_KEY_LENGTH);
+			if (mkey.data == NULL) {
+				return NGX_ERROR;
+			}
+			
+			ngx_http_session_binding_proxy_copy_master_secret(ssl_session, mkey.data, &mkey.len);
+			
+			ngx_http_session_binding_proxy_convert_to_hex(mkey, master_key);
+			
 			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %V", &master_key);
 		}
 	}
