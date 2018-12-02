@@ -1,5 +1,5 @@
 /**
-Copyright (c) <2012>, <Willem Burgers>
+Copyright (c) <2018>, <Willem Burgers>
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
@@ -34,7 +34,7 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 enum {
     ngx_http_sbp_key_length = 256 / 8 * 2,
-		//256 bits devided by 8 to get the bytes * 2 to get the number of hexadecimal chars.
+	//256 bits devided by 8 to get the bytes * 2 to get the number of hexadecimal chars.
     ngx_http_sbp_iv_length = EVP_MAX_IV_LENGTH,
 	MAX_RANDOM_STRING = 64
 };
@@ -68,7 +68,7 @@ ngx_int_t ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t
 
 ngx_int_t ngx_http_session_binding_proxy_generate_random_string(ngx_str_t *res, ngx_int_t length);
 
-static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
+static ngx_http_output_header_filter_pt ngx_http_next_header_filter;
 
 /**
 Define the directive for SBP and which function to call when it is read in the conf
@@ -88,7 +88,7 @@ static ngx_command_t ngx_http_session_binding_proxy_commands[] = {
 		0,
 		NULL
     },
- 
+
     ngx_null_command
 };
 
@@ -127,9 +127,7 @@ ngx_module_t ngx_http_session_binding_proxy_module = {
     NGX_MODULE_V1_PADDING
 };
 
-static void *
-ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf)
-{
+static void* ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf) {
     ngx_http_session_binding_proxy_loc_conf_t  *conf;
 
     conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_session_binding_proxy_loc_conf_t));
@@ -137,19 +135,17 @@ ngx_http_session_binding_proxy_create_loc_conf(ngx_conf_t *cf)
     if (conf == NULL) {
         return NGX_CONF_ERROR;
     }
-	
+
 	conf->enable = NGX_CONF_UNSET;
 	conf->variables = NGX_CONF_UNSET_PTR;
 
     return conf;
 }
 
-static char *
-ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
-{
+static char* ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child) {
     ngx_http_session_binding_proxy_loc_conf_t *prev = parent;
     ngx_http_session_binding_proxy_loc_conf_t *conf = child;
-	
+
 	ngx_conf_merge_value(conf->enable, prev->enable, 0);
 	ngx_conf_merge_str_value(conf->key, prev->key, NULL);
 	ngx_conf_merge_ptr_value(conf->variables, prev->variables, NULL);
@@ -157,48 +153,74 @@ ngx_http_session_binding_proxy_merge_loc_conf(ngx_conf_t *cf, void *parent, void
     return NGX_CONF_OK;
 }
 
+static void ngx_http_session_binding_proxy_copy_master_secret(const SSL_SESSION *session, unsigned char *master_key_out, size_t *keylen_out) {
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
+    *keylen_out = SSL_SESSION_get_master_key(session, master_key_out, SSL_MAX_MASTER_KEY_LENGTH);
+#else
+    if (session->master_key_length > 0) {
+        *keylen_out = session->master_key_length;
+        memcpy(master_key_out, session->master_key,
+                session->master_key_length);
+    }
+#endif
+}
+
+static void ngx_http_session_binding_proxy_convert_to_hex(ngx_str_t master_key_in, ngx_str_t master_key_out) {
+	ngx_uint_t i;
+	for(i = 0; i < master_key_in.len; i++) {
+		unsigned char c1 = ((unsigned char) master_key_in.data[i]) >> 4;
+		unsigned char c2 = master_key_in.data[i] & 0xF;
+		master_key_out.data[2*i] = c1 < 10 ? '0' + c1 : 'A' + c1 - 10;
+		master_key_out.data[2*i+1] = c2 < 10 ? '0' + c2 : 'A' + c2 - 10;
+	}
+}
+
 /**
 Handle incoming requests. If they contain cookies that are specified in the conf, then it will be decrypted.
 */
-static ngx_int_t
-ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
-{	
+static ngx_int_t ngx_http_session_binding_proxy_handler(ngx_http_request_t *r) {
 	ngx_http_session_binding_proxy_loc_conf_t	*sbplcf;
     sbplcf = ngx_http_get_module_loc_conf(r, ngx_http_session_binding_proxy_module);
-	
+
 	if (sbplcf->enable != 1) { //module not enabled in nginx.conf.
 		return NGX_DECLINED;
 	}
-	
+
 	if (sbplcf->key.data == NULL) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                 "session_binding_proxy: a key is required to be defined");
         return NGX_ERROR;
     }
-	
-	ngx_str_t							master_key;
-	master_key.len = 0;
+
+	ngx_str_t master_key;
+	master_key.len = SSL_MAX_MASTER_KEY_LENGTH * 2;
 	master_key.data = ngx_pcalloc(r->pool, master_key.len);
 	if (master_key.data == NULL) {
         return NGX_ERROR;
     }
-	
+
 	//Check if we indeed have an SSL connection
 	if (r->connection->ssl) {
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
 		if (ssl_session) {
-			uint64_t* mkey = (uint64_t*)ssl_session->master_key;
-			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
-			master_key.len = ssl_session->master_key_length;
-			master_key.data = ngx_pnalloc(r->pool, master_key.len);
-			ngx_snprintf(master_key.data, master_key.len, "%016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
+			ngx_str_t mkey;
+			mkey.data = ngx_pcalloc(r->pool, SSL_MAX_MASTER_KEY_LENGTH);
+			if (mkey.data == NULL) {
+				return NGX_ERROR;
+			}
+			
+			ngx_http_session_binding_proxy_copy_master_secret(ssl_session, mkey.data, &mkey.len);
+			
+			ngx_http_session_binding_proxy_convert_to_hex(mkey, master_key);
+			
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %V", &master_key);
 		}
 	}
 	else {
 		ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"cannot decrypt cookie");
 		return NGX_ERROR;
 	}
-	
+
 	/**
 	define most variables here now that we know the module is enabled and a proper key is set
 	*/
@@ -210,7 +232,7 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 	ngx_str_t							iv, arg, MAC, newMAC, cookie, concatkey, deckey, *variable;
 	size_t								len;
 	ngx_int_t							rc;
-	
+
 	variable = sbplcf->variables->elts;
 	part = &r->headers_in.headers.part;
 	header = part->elts;
@@ -223,26 +245,26 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 	if (concatkey.data == NULL) {
         return NGX_ERROR;
     }
-	
+
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"your key: %V",&(sbplcf->key));
-	
+
 	p = ngx_copy(p, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
 	p = ngx_copy(p, master_key.data, master_key.len);
-	
+
 	SHA256(concatkey.data, concatkey.len, hash); //hash the two keys. The output is the encryption/decryption key for this ssl connection.
-	
+
 	deckey.len = SHA256_DIGEST_LENGTH*2; //hex representation of the key for use with AES
-	
+
     for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
         sprintf(&mdString[i*2],"%02X", (unsigned int) hash[i]); //ngx_sprintf can't print to char array, so we need the normal sprintf
     }
-	
+
 	deckey.data = (u_char*) &mdString[0]; //use this char array as the data for the key string. Bit messy, but it works.
-	
+
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 						"Session Binding Proxy encryption/decryption key: %V",
 						&deckey);
-	
+
 	for (i = 0; /* void */; i++) { //For each header
 		if (i >= part->nelts) {
 			if (part->next == NULL) {
@@ -253,22 +275,20 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 			header = part->elts;
 			i = 0;
 		}
-		
-		if(ngx_strncmp((&header[i])->key.data, "Cookie",6) == 0) //If the header is the cookie header
-		{
+
+		if(ngx_strncmp((&header[i])->key.data, "Cookie",6) == 0) { //If the header is the cookie header
 			for(j = 0;j<sbplcf->variables->nelts;j++) { // For every specified cookie name in the conf
 				ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 							"Session Binding Proxy Handler searching for: %V", &variable[j]);
-				
+
 				ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 							"Session Binding Proxy Handler in string: %V", &((&header[i])->value));
-				
-				if((p1 = (u_char *) ngx_strstr(((&header[i])->value).data, variable[j].data)) != NULL) //find the cookie value and iv
-				{	
+
+				if((p1 = (u_char *) ngx_strstr(((&header[i])->value).data, variable[j].data)) != NULL) { //find the cookie value and iv
 					p2 = (u_char *) ngx_strchr(p1, '=');
 					p3 = (u_char *) ngx_strchr(p1, '-');
 					p4 = (u_char *) ngx_strchr(p1, ';');
-					
+
 					if(p2) {
 						p2++;
 						iv.len = ((&header[i])->value.data + (&header[i])->value.len) - p2;
@@ -283,16 +303,16 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 						}
 						iv.data = p2;
 					}
-					
+
 					if(iv.data == NULL){
 						ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
 							"could not get the IV back from incoming cookie");
 						return NGX_ERROR;
 					}
-					
+
 					ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 							"Encrypted cookie value: %V", &arg);
-					
+
 					// base64 decode the cookie value
 					ngx_str_t decoded;
 					decoded.len = ngx_base64_decoded_length(arg.len) + 1;
@@ -302,20 +322,20 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 					}
 					ngx_decode_base64(&decoded, &arg);
 					decoded.data[decoded.len] = '\0';
-					
+
 					MAC.len = SHA256_DIGEST_LENGTH;
 					MAC.data = decoded.data;
-					
+
 					decoded.len -= SHA256_DIGEST_LENGTH;
 					decoded.data += SHA256_DIGEST_LENGTH;
-					
+
 					rc = ngx_http_session_binding_proxy_sha256_hash(r->pool, decoded, &newMAC);
 					if (rc != NGX_OK) {
 						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
 								"Session Binding Proxy: failed to generate MAC");
 						return NGX_ERROR;
 					}
-					
+
 					if (ngx_strncmp(MAC.data, newMAC.data, SHA256_DIGEST_LENGTH) != 0) {
 						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
 							"Session Binding Proxy: SHA256 checksum mismatch.");
@@ -331,11 +351,11 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 							ngx_str_t decrypted;
 							decrypted.len = len;
 							decrypted.data = dst;
-							
+
 							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 										"Session Binding Proxy decrypted: %V",
 										&decrypted);
-							
+
 							//get the actual value of the cookie for the backend server
 							cookie.len = (p1 - header[i].value.data);
 							cookie.len += variable[j].len;
@@ -344,12 +364,12 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 							if(p4){
 								cookie.len += (header[i].value.data + header[i].value.len) - p4;
 							}
-							
+
 							p = cookie.data = ngx_palloc(r->pool, cookie.len);
 							if(p == NULL) {
 								return NGX_ERROR;
 							}
-							
+
 							//build the new cookie header
 							p = ngx_copy(p, header[i].value.data, p1 - header[i].value.data);
 							p = ngx_copy(p, variable[j].data, variable[j].len);
@@ -358,11 +378,11 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 							if(p4){
 								p = ngx_copy(p, p4, (header[i].value.data + header[i].value.len) - p4);
 							}
-							
+
 							//replace the cookie header with this decrypted one
 							header[i].value.len = cookie.len;
 							header[i].value.data = cookie.data;
-							
+
 							ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 								"Session Binding Proxy cookie to backend: \"%V: %V\"",
 								&header[i].key, &header[i].value);
@@ -378,7 +398,7 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 			}
 		}
 	}
-	
+
 	return NGX_DECLINED;
 }
 
@@ -386,16 +406,14 @@ ngx_http_session_binding_proxy_handler(ngx_http_request_t *r)
 This filter works on responses coming from the backend server.
 Check all headers for cookies and if one of the specified cookie names in the conf is set, encrypt it.
 */
-static ngx_int_t
-ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
-{
+static ngx_int_t ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r) {
     ngx_http_session_binding_proxy_loc_conf_t  *sbplcf;
     sbplcf = ngx_http_get_module_loc_conf(r, ngx_http_session_binding_proxy_module);
-	
+
 	if (sbplcf->enable != 1) { //module not enabled in nginx.conf.
 		return ngx_http_next_header_filter(r);
 	}
-	
+
 	if (sbplcf->key.data == NULL) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                 "session_binding_proxy: a key is required to be defined");
@@ -404,34 +422,40 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
     }
 
 	ngx_str_t							master_key;
-	master_key.len = 0;
+	master_key.len = SSL_MAX_MASTER_KEY_LENGTH * 2;
 	master_key.data = ngx_pcalloc(r->pool, master_key.len);
 	if (master_key.data == NULL) {
         return NGX_ERROR;
     }
-	
+
 	//check if we indeed have an SSL connection
 	if (r->connection->ssl) {
 		SSL_SESSION* ssl_session = SSL_get_session(r->connection->ssl->connection);
 		if (ssl_session) {
-			uint64_t* mkey = (uint64_t*)ssl_session->master_key;
-			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
-			master_key.len = ssl_session->master_key_length;
-			master_key.data = ngx_pnalloc(r->pool, master_key.len);
-			ngx_snprintf(master_key.data, master_key.len, "%016xL%016xL%016xL",*(mkey),*(mkey+1),*(mkey+2));
+			ngx_str_t mkey;
+			mkey.data = ngx_pcalloc(r->pool, SSL_MAX_MASTER_KEY_LENGTH);
+			if (mkey.data == NULL) {
+				return NGX_ERROR;
+			}
+			
+			ngx_http_session_binding_proxy_copy_master_secret(ssl_session, mkey.data, &mkey.len);
+			
+			ngx_http_session_binding_proxy_convert_to_hex(mkey, master_key);
+			
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"ssl_session_master_key: %V", &master_key);
 		}
 	}
 	else {
 		ngx_log_error(NGX_LOG_ERR,r->connection->log,0,"cannot encrypt cookie, no ssl connection");
 		return NGX_ERROR;
 	}
-	
+
 	ngx_str_t							iv;
 	iv.data = ngx_pnalloc(r->pool, ngx_http_sbp_iv_length);
     if (iv.data == NULL) {
         return NGX_ERROR;
     }
-	
+
 	switch(ngx_http_session_binding_proxy_generate_random_string(&(iv), ngx_http_sbp_iv_length))
 	{
 		case 0:
@@ -454,7 +478,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 				"Something went wrong when generating the IV");
 			return NGX_ERROR;
 	}
-	
+
 	if (iv.len > ngx_http_sbp_iv_length) {
 		ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
 				"Session Binding Proxy: the init vector must NOT "
@@ -462,7 +486,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 				ngx_http_sbp_iv_length);
 		return NGX_ERROR;
 	}
-	
+
 	// Define most variables here after the checks
 	ngx_str_t							arg, value, encrypted, MAC, res, concatkey, enckey, *variable;
 	ngx_uint_t							i,j;
@@ -472,39 +496,39 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 	char								mdString[SHA256_DIGEST_LENGTH*2+1];
 	size_t								len;
     ngx_int_t							rc;
-	
+
 	variable = sbplcf->variables->elts;
 	part = &r->headers_out.headers.part;
 	header = part->elts;
 
 	arg.len = 0;
-	
+
 	concatkey.len = sbplcf->key.len; //create the concatkey variable
 	concatkey.len += master_key.len;
 	p = concatkey.data = ngx_pcalloc(r->pool, concatkey.len);
 	if (concatkey.data == NULL) {
         return NGX_ERROR;
     }
-	
+
 	p = ngx_copy(p, sbplcf->key.data, sbplcf->key.len); //concatenate the two keys
 	p = ngx_copy(p, master_key.data, master_key.len);
-	
+
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP,r->connection->log,0,"your key: %V",&(sbplcf->key));
-	
+
 	SHA256(concatkey.data, concatkey.len, hash); //hash the two keys. The output is the encryption/decryption key for this ssl connection.
-	
+
 	enckey.len = SHA256_DIGEST_LENGTH*2; //hex representation of the key for use with AES
-	
+
     for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
         sprintf(&mdString[i*2],"%02X", (unsigned int) hash[i]); //ngx_sprintf can't print to char array, so we need the normal sprintf
     }
-	
+
 	enckey.data = (u_char*) &mdString[0]; //use this char array as the data for the key string. Bit messy, but it works.
-	
+
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 						"Session Binding Proxy encryption/decryption key: %V",
 						&enckey);
-	
+
 	for (i = 0; /* void */; i++) { // For each header
 
 		if (i >= part->nelts) {
@@ -516,26 +540,26 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 			header = part->elts;
 			i = 0;
 		}
-		
-		if(ngx_strncmp((&header[i])->key.data, "Set-Cookie",10) == 0) //If the header is a Set-Cookie header
-		{
+
+		if(ngx_strncmp((&header[i])->key.data, "Set-Cookie",10) == 0) { //If the header is a Set-Cookie header
 			for(j = 0;j<sbplcf->variables->nelts;j++) {//See if this cookie needs to be encrypted (specified in the conf)
-				if(ngx_strncmp((&header[i])->value.data, variable[j].data, variable[j].len) != 0)
+				if(ngx_strncmp((&header[i])->value.data, variable[j].data, variable[j].len) != 0) {
 					continue;
-				else{
+				}
+				else {
 					p1 = (u_char *) ngx_strchr((&header[i])->value.data, '='); // find the value of the cookie (between = and ;
 					p2 = (u_char *) ngx_strchr((&header[i])->value.data, ';');
-					
+
 					//copy the cookie value to a new string
 					arg.len = 0;
 					arg.data = ngx_palloc(r->pool, arg.len);
-					
+
 					if (p1 && p2) {
 						p1++;
 						arg.len = (((&header[i])->value.data + (&header[i])->value.len) - p1) - (((&header[i])->value.data + (&header[i])->value.len) - p2);
 						arg.data = p1;
 					}
-					
+
 					value.len = arg.len;
 					p = value.data = ngx_palloc(r->pool, value.len);
 
@@ -544,7 +568,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					}
 
 					p = ngx_copy(p, arg.data, arg.len);
-					
+
 					//encrypt the value
 					rc = ngx_http_session_binding_proxy_aes_encrypt(r->pool,
 							r->connection->log, iv.data, iv.len,
@@ -561,7 +585,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 
 					encrypted.data = dst;
 					encrypted.len = len;
-					
+
 					rc = ngx_http_session_binding_proxy_sha256_hash(r->pool, encrypted, &MAC);
 					if (rc != NGX_OK) {
 						ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
@@ -575,10 +599,10 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					if (p == NULL) {
 						return NGX_ERROR;
 					}
-					
+
 					p = ngx_copy(p, MAC.data, MAC.len);
 					p = ngx_copy(p, encrypted.data, encrypted.len);
-					
+
 					//base64 encode the encrypted value, because otherwise it might not be sendable
 					ngx_str_t encoded;
 					len = ngx_base64_encoded_length(res.len) + 1;
@@ -588,7 +612,7 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					}
 					ngx_encode_base64(&encoded, &res);
 					encoded.data[encoded.len] = '\0';
-					
+
 					//build the new cookie header data
 					ngx_str_t cookie_value;
 					cookie_value.len = variable[j].len; // name of the cookie.
@@ -597,24 +621,24 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 					cookie_value.len++; // - include a dash to separate iv from cookie value
 					cookie_value.len += encoded.len; //length of the encrypted value.
 					cookie_value.len += (((&header[i])->value.data + (&header[i])->value.len) - p2); //length of the rest of the cookie value
-					
+
 					p = cookie_value.data = ngx_palloc(r->pool, cookie_value.len);
 
 					if(p == NULL) {
 						return NGX_ERROR;
 					}
-					
+
 					p = ngx_copy(p, variable[j].data, variable[j].len);
 					p = ngx_copy(p, "=", 1);
 					p = ngx_copy(p, iv.data, iv.len);
 					p = ngx_copy(p, "-", 1);
 					p = ngx_copy(p, encoded.data, encoded.len);
 					p = ngx_copy(p, p2, ((&header[i])->value.data + (&header[i])->value.len) - p2);
-					
+
 					//replace the header with the encrypted one
 					header[i].value.len = cookie_value.len;
 					header[i].value.data = cookie_value.data;
-					
+
 					ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 						"Session Binding Proxy cookie to client: \"%V: %V\"",
 						&header[i].key, &header[i].value);
@@ -622,20 +646,19 @@ ngx_http_session_binding_proxy_header_filter(ngx_http_request_t *r)
 			}
 		}
 	}
-	
+
 	return ngx_http_next_header_filter(r);
 }
 
-ngx_int_t ngx_http_session_binding_proxy_sha256_hash(ngx_pool_t *pool, ngx_str_t data, ngx_str_t *dst)
-{
+ngx_int_t ngx_http_session_binding_proxy_sha256_hash(ngx_pool_t *pool, ngx_str_t data, ngx_str_t *dst) {
 	(*dst).len = SHA256_DIGEST_LENGTH;
 	(*dst).data = ngx_palloc(pool, (*dst).len);
 	if ((*dst).data == NULL) {
 		return NGX_ERROR;
 	}
-	
+
 	SHA256(data.data, data.len, (*dst).data);
-	
+
 	return NGX_OK;
 }
 
@@ -647,9 +670,8 @@ see https://github.com/agentzh/encrypted-session-nginx-module for details
 ngx_int_t ngx_http_session_binding_proxy_aes_encrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in,
-		u_char **dst, size_t *dst_len)
-{
-    EVP_CIPHER_CTX ctx;
+		u_char **dst, size_t *dst_len) {
+    EVP_CIPHER_CTX* ctx;
     const EVP_CIPHER *cipher;
     u_char *p, *data;
     int ret;
@@ -661,7 +683,8 @@ ngx_int_t ngx_http_session_binding_proxy_aes_encrypt(ngx_pool_t *pool, ngx_log_t
         return NGX_ERROR;
     }
 
-    EVP_CIPHER_CTX_init(&ctx);
+	ctx = EVP_CIPHER_CTX_new();
+	EVP_CIPHER_CTX_init(ctx);
 
     cipher = EVP_aes_256_cbc();
 
@@ -683,32 +706,33 @@ ngx_int_t ngx_http_session_binding_proxy_aes_encrypt(ngx_pool_t *pool, ngx_log_t
 
     ngx_memcpy(data, in.data, in.len);
 
-    ret = EVP_EncryptInit(&ctx, cipher, key, iv);
+    ret = EVP_EncryptInit(ctx, cipher, key, iv);
     if (! ret) {
         goto evp_error;
     }
 
     /* encrypt the raw input data */
 
-    ret = EVP_EncryptUpdate(&ctx, p, &len, data, data_size);
+    ret = EVP_EncryptUpdate(ctx, p, &len, data, data_size);
     if (! ret) {
         goto evp_error;
     }
 
     p += len;
 
-	ret = EVP_EncryptFinal(&ctx, p, &len);
-	
+	ret = EVP_EncryptFinal(ctx, p, &len);
+
     /* XXX we should still explicitly release the ctx *
 	* or we'll leak memory here */
-    EVP_CIPHER_CTX_cleanup(&ctx);
-	
+    EVP_CIPHER_CTX_cleanup(ctx);
+	EVP_CIPHER_CTX_free(ctx);
+
 	if (! ret) {
         return NGX_ERROR;
     }
-	
+
     p += len;
-	
+
     *dst_len = p - *dst;
 
     if (*dst_len > buf_size) {
@@ -721,19 +745,17 @@ ngx_int_t ngx_http_session_binding_proxy_aes_encrypt(ngx_pool_t *pool, ngx_log_t
     return NGX_OK;
 
 evp_error:
-
-    EVP_CIPHER_CTX_cleanup(&ctx);
+	EVP_CIPHER_CTX_cleanup(ctx);
+    EVP_CIPHER_CTX_free(ctx);
 
     return NGX_ERROR;
 }
 
-ngx_int_t
-ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
+ngx_int_t ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
         const u_char *iv, size_t iv_len, const u_char *key,
         size_t key_len, ngx_str_t in, u_char **dst,
-        size_t *dst_len)
-{
-    EVP_CIPHER_CTX ctx;
+        size_t *dst_len) {
+    EVP_CIPHER_CTX *ctx;
     const EVP_CIPHER *cipher;
     int ret;
     size_t block_size, buf_size;
@@ -744,11 +766,12 @@ ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
         return NGX_ERROR;
     }
 
-    EVP_CIPHER_CTX_init(&ctx);
+	ctx = EVP_CIPHER_CTX_new();
+    EVP_CIPHER_CTX_init(ctx);
 
     cipher = EVP_aes_256_cbc();
 
-    ret = EVP_DecryptInit(&ctx, cipher, key, iv);
+    ret = EVP_DecryptInit(ctx, cipher, key, iv);
     if (! ret) {
         goto evp_error;
     }
@@ -766,7 +789,7 @@ ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
 
     *dst = p;
 
-    ret = EVP_DecryptUpdate(&ctx, p, &len, in.data,
+    ret = EVP_DecryptUpdate(ctx, p, &len, in.data,
             in.len);
 
     if (! ret) {
@@ -775,11 +798,12 @@ ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
 
     p += len;
 
-    ret = EVP_DecryptFinal(&ctx, p, &len);
+    ret = EVP_DecryptFinal(ctx, p, &len);
 
     /* XXX we should still explicitly release the ctx *
 	* or we'll leak memory here */
-    EVP_CIPHER_CTX_cleanup(&ctx);
+    EVP_CIPHER_CTX_cleanup(ctx);
+	EVP_CIPHER_CTX_free(ctx);
 
     if (! ret) {
         ngx_log_debug0(NGX_LOG_DEBUG_HTTP, log, 0,
@@ -801,8 +825,8 @@ ngx_http_session_binding_proxy_aes_decrypt(ngx_pool_t *pool, ngx_log_t *log,
     return NGX_OK;
 
 evp_error:
-
-    EVP_CIPHER_CTX_cleanup(&ctx);
+    EVP_CIPHER_CTX_cleanup(ctx);
+	EVP_CIPHER_CTX_free(ctx);
 
     return NGX_ERROR;
 }
@@ -810,45 +834,41 @@ evp_error:
 /**
 Generate a string of random hexadecimal characters
 */
-ngx_int_t
-ngx_http_session_binding_proxy_generate_random_string(ngx_str_t *res, ngx_int_t length)
-{	
+ngx_int_t ngx_http_session_binding_proxy_generate_random_string(ngx_str_t *res, ngx_int_t length) {
 	static u_char alphabet[] = "ABCDEF0123456789";
-								
+
 	u_char			entropy[MAX_RANDOM_STRING];
 	u_char			output[MAX_RANDOM_STRING];
 	ngx_int_t		i;
 	ngx_fd_t		fd;
 	ssize_t			n;
-	
+
 	fd = ngx_open_file("/dev/urandom", NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
 	if (fd == NGX_INVALID_FILE) {
 		return 1;
 	}
-	
+
 	n = ngx_read_fd(fd, entropy, length);
 	if (n != length) {
 		return 2;
 	}
 
 	ngx_close_file(fd);
-	
+
 	for (i = 0; i < length; i++) {
 		output[i] = alphabet[ entropy[i] % (sizeof alphabet - 1) ];
 	}
-	
+
 	ngx_memcpy(res->data,output,length);
 	res->len = length;
-	
+
 	return 0;
 }
 
 /**
 Read cookie names from the conf file
 */
-static char *
-ngx_http_session_binding_proxy_add_variables(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
+static char* ngx_http_session_binding_proxy_add_variables(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
     ngx_http_session_binding_proxy_loc_conf_t		*sbplcf = conf;
 
     ngx_uint_t										i;
@@ -889,22 +909,20 @@ ngx_http_session_binding_proxy_add_variables(ngx_conf_t *cf, ngx_command_t *cmd,
 This function is called when the directive is specified in the conf file.
 It reads all parameters in the conf for the session_binding_proxy directive.
 */
-static char *
-ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
+static char* ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
 	ngx_http_session_binding_proxy_loc_conf_t  *sbplcf = conf;
-	
+
 	if(cf->args->nelts < 1) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                "invalid number of arguments for the session_binding_proxy directive");
 		return NGX_CONF_ERROR;
 	}
-	
+
 	sbplcf->key.data = ngx_palloc(cf->pool, ngx_http_sbp_key_length);
     if (sbplcf->key.data == NULL) {
         return NGX_CONF_ERROR;
     }
-	
+
 	switch(ngx_http_session_binding_proxy_generate_random_string(&(sbplcf->key), ngx_http_sbp_key_length))
 	{
 		case 0:
@@ -927,11 +945,11 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 				"Something went wrong when generating the key");
 			return NGX_CONF_ERROR;
 	}
-	
+
 	if(ngx_http_session_binding_proxy_add_variables(cf, cmd, conf) != NGX_CONF_OK) {
         return NGX_CONF_ERROR;
     }
-	
+
 	sbplcf->enable = 1;
 
     return NGX_CONF_OK;
@@ -941,20 +959,18 @@ ngx_http_session_binding_proxy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 This function is called when the directive is specified in the conf file.
 It reads all parameters in the conf for the session_binding_proxy_key directive.
 */
-static char *
-ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
-{
+static char* ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
 	ngx_str_t									*value;
 	ngx_http_session_binding_proxy_loc_conf_t	*sbplcf = conf;
-	
+
 	if(cf->args->nelts != 2) {
 		ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                                "invalid number of arguments for the session_binding_proxy_key directive");
 		return NGX_CONF_ERROR;
 	}
-	
+
 	value = cf->args->elts;
-	
+
 	if (value[1].len != ngx_http_sbp_key_length) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                 "session_binding_proxy_key: the key must be of %d bytes long",
@@ -962,13 +978,13 @@ ngx_http_session_binding_proxy_key(ngx_conf_t *cf, ngx_command_t *cmd, void *con
 
         return NGX_CONF_ERROR;
     }
-	
+
 	sbplcf->key.len = ngx_http_sbp_key_length;
 	sbplcf->key.data = value[1].data;
-	
+
 	ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
 				"random key override: %V",&(sbplcf->key));
-	
+
 	return NGX_CONF_OK;
 }
 
@@ -977,8 +993,7 @@ Register the module on startup.
 Even if the module is not used (the directive is in the conf), it is added to the list of handlers and filters.
 The check functions in the handler and filter skip to the next handler or filter if the module is not enabled.
 */
-static ngx_int_t ngx_http_session_binding_proxy_init(ngx_conf_t *cf)
-{
+static ngx_int_t ngx_http_session_binding_proxy_init(ngx_conf_t *cf) {
 	ngx_http_handler_pt        *h;
     ngx_http_core_main_conf_t  *cmcf;
 
@@ -990,9 +1005,9 @@ static ngx_int_t ngx_http_session_binding_proxy_init(ngx_conf_t *cf)
     }
 
     *h = ngx_http_session_binding_proxy_handler;
-	
+
 	ngx_http_next_header_filter = ngx_http_top_header_filter;
 	ngx_http_top_header_filter = ngx_http_session_binding_proxy_header_filter;
-	
+
 	return NGX_OK;
 }
