@@ -48,7 +48,7 @@ The session_binding_proxy_key directive takes only 1 argument, namely the privat
 It is a key that only resides in Nginx, such that the end user cannot decrypt the given cookie.
 This is an optional directive. A random key is generated on every startup of Nginx.
 This directive overwrites the random key.
-(When multiple Session Binding Proxy servers are used in a larger network, implementing the same key can be usefull.)
+(When multiple Session Binding Proxy servers are used in a larger network, implementing the same key can be useful.)
 Make sure you use 64 hexadecimal characters.
 
 If your application resides on a different server in the backend, you can use the reverse proxy in Nginx with the proxy_pass directive.
